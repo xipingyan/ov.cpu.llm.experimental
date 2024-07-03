@@ -7,7 +7,7 @@ import os
 import sys
 import torch
 
-OV_XML_FILE_NAME="openvino.xml"
+OV_XML_FILE_NAME="openvino_model.xml"
 
 ext_path = None
 if sys.platform == 'win32':
@@ -19,7 +19,7 @@ else:
     exit(1)
 
 custom_opset = opset_utils._get_node_factory()
-custom_opset.add_extension(ext_path)
+#custom_opset.add_extension(ext_path)
 
 configs = {
     'quant_type': 'nncf_w8',        # valid: '', 'nncf_w8', 'llama_w8_0',
@@ -168,7 +168,7 @@ def make_fc(key, input, consts, name_suffix=''):
     weight = consts[f'{key}.weight']
 
     # try experimental fc first
-    matmul = make_experimental_fc(input, weight, key)
+    matmul = None #make_experimental_fc(input, weight, key)
 
     # fallbacks
     if not matmul:
@@ -221,4 +221,6 @@ def make_embedding(key, input, consts):
 
 def save_tokenzier(orig_model_path, ov_model_path):
     tokenizer = AutoTokenizer.from_pretrained(orig_model_path)
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     tokenizer.save_pretrained(ov_model_path)
