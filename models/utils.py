@@ -1,25 +1,21 @@
 from transformers import AutoTokenizer
-from openvino.runtime import Core, Model, Tensor, PartialShape, Type, serialize, opset_utils
+from openvino.runtime import Core, Model, Tensor, PartialShape, Type, serialize, opset_utils, Node, Output, Extension
 from openvino.runtime import opset10 as opset
 from openvino.runtime.op import Constant
+from openvino.runtime.op import _MultiHeadAttention as mha
 import numpy as np
 import os
 import sys
 import torch
+from typing import Any, Dict, List, Optional, Union
+from openvino.runtime.opset_utils import _get_node_factory
+from openvino.runtime.utils.decorators import binary_op, nameable_op, unary_op
+from functools import partial
+from openvino.runtime.utils.types import NodeInput, as_node, as_nodes
 
-OV_XML_FILE_NAME="openvino.xml"
+_get_node_factory_opset4 = partial(_get_node_factory, "opset4")
 
-ext_path = None
-if sys.platform == 'win32':
-    ext_path = ".\\custom_ops\\build\\Release\\ov-cpu-llm-experimental.dll"
-elif sys.platform == 'linux':
-    ext_path = "./custom_ops/build/libov-cpu-llm-experimental.so"
-else:
-    print(f"Sample code not supported on platform: {sys.platform}")
-    exit(1)
-
-custom_opset = opset_utils._get_node_factory()
-custom_opset.add_extension(ext_path)
+OV_XML_FILE_NAME="openvino_model.xml"
 
 configs = {
     'quant_type': 'nncf_w8',        # valid: '', 'nncf_w8', 'llama_w8_0',
@@ -87,6 +83,15 @@ def show_model(m):
     for port, _output in enumerate(m.outputs):
         print('	[{}] {}'.format(port, _output))
 
+def _arguments_as_outputs(arguments: List[Union[Node, Output]]) -> List[Output]:
+    outputs = []
+    for argument in arguments:
+        if issubclass(type(argument), Output):
+            outputs.append(argument)
+        else:
+            outputs.extend(argument.outputs())
+    return outputs
+
 def make_mha(qkvs, kv_cache, beam_table, attn_mask, cos_tab, sin_tab,
              layer_idx, rotary_dim, n_hidden, n_head, name, num_kv_heads=0, rope_type='modified', multi_query_is_planar=False):
     qkvs_len = len(qkvs)
@@ -112,8 +117,7 @@ def make_mha(qkvs, kv_cache, beam_table, attn_mask, cos_tab, sin_tab,
         mha_attr['arg_k'] = 1
         mha_attr['arg_v'] = 2
 
-    output = custom_opset.create('MultiHeadAttention', 
-        [*qkvs, kv_cache, beam_table, attn_mask, cos_tab, sin_tab], mha_attr)
+    output = mha(_arguments_as_outputs([*qkvs, kv_cache, beam_table, attn_mask, cos_tab, sin_tab]), mha_attr)
     output.set_friendly_name(name)
     return output
 
@@ -167,16 +171,18 @@ def make_fc(key, input, consts, name_suffix=''):
     # weight const f32 NxK
     weight = consts[f'{key}.weight']
 
-    # try experimental fc first
-    matmul = make_experimental_fc(input, weight, key)
-
     # fallbacks
-    if not matmul:
+    if True:
         if configs['quant_type'] == 'nncf_w8':
             weights = _make_compressed_weight_nncf(weight, key)
         elif configs['quant_type'] == '':
             weights = Constant(weight, True)
             weights.set_friendly_name(name=f'{key}.weight{name_suffix}')
+        elif configs['quant_type'] == 'f16':
+            weight_f16 = weight.astype(np.float16)
+            weight_node = Constant(weight_f16, True)
+            weight_node.set_friendly_name(name=f'{key}.weight{name_suffix}')
+            weights = opset.convert(weight_node, 'f32', name=f'{key}.weight{name_suffix}.convert')
         else:
             raise Exception(f"Unknown quant type: {configs['quant_type']}")
         matmul = opset.matmul(input, weights, transpose_a=False, transpose_b=True, name=f'{key}.matmul{name_suffix}')
@@ -201,18 +207,26 @@ def make_mvn(key, input, consts, configs, name_suffix=''):
 
 def make_rms_norm(key, input, consts, epsilon, name_suffix=''):
     weights = opset.constant(consts[f'{key}.weight'], Type.f32, name=f'{key}.weight{name_suffix}')
-    pow = opset.multiply(input, input, name=f'{key}.pow{name_suffix}')
-    #pow = opset.power(input, np.array([2], np.float32), name=f'{key}.pow{name_suffix}')
+    #pow = opset.multiply(input, input, name=f'{key}.pow{name_suffix}')
+    pow = opset.power(input, np.array([2], np.float32), name=f'{key}.pow{name_suffix}')
     variance = opset.reduce_mean(pow, reduction_axes=[-1], keep_dims=True, name=f'{key}.var{name_suffix}')
     add = opset.add(variance, opset.constant(epsilon, Type.f32), name=f'{key}.add{name_suffix}')
     sqrt = opset.sqrt(add, name=f'{key}.sqrt{name_suffix}')
-    div = opset.divide(input, sqrt, name=f'{key}.div{name_suffix}')
-    mul = opset.multiply(div, weights, auto_broadcast='numpy', name=f'{key}.mul{name_suffix}')
-    return mul
+    div = opset.power(sqrt, np.array([-1], np.float32))
+    mul = opset.multiply(input, div, auto_broadcast='numpy', name=f'{key}.mul{name_suffix}')
+    #div = opset.divide(input, sqrt, name=f'{key}.div{name_suffix}')
+    mul2 = opset.multiply(weights, mul, auto_broadcast='numpy', name=f'{key}.mul2{name_suffix}')
+    return mul2
 
 def make_embedding(key, input, consts):
     if configs['quant_type'] != '':
-        embed_in_const = _make_compressed_weight_nncf(consts[key], key)
+        if configs['quant_type'] == 'f16':
+            emb_f16 = consts[key].astype(np.float16)
+            emb_node = Constant(emb_f16, True)
+            emb_node.set_friendly_name(name=f'{key}')
+            embed_in_const = opset.convert(emb_node, 'f32', name=f'{key}.convert')
+        else:
+            embed_in_const = _make_compressed_weight_nncf(consts[key], key)
     else:
         embed_in_const = Constant(consts[key], True)
         embed_in_const.set_friendly_name(name=key)
@@ -222,3 +236,15 @@ def make_embedding(key, input, consts):
 def save_tokenzier(orig_model_path, ov_model_path):
     tokenizer = AutoTokenizer.from_pretrained(orig_model_path)
     tokenizer.save_pretrained(ov_model_path)
+
+@nameable_op
+def swish(
+    data: NodeInput,
+    name: Optional[str] = None,
+) -> Node:
+    """Return a node which performing Swish activation function Swish(x, beta=1.0) = x * sigmoid(x * beta)).
+
+    :param data: Tensor with input data floating point type.
+    :return: The new node which performs Swish
+    """
+    return _get_node_factory_opset4().create("Swish", as_nodes(data, name=name), {})

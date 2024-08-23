@@ -13,6 +13,7 @@ def prepare_next_input(model_inputs, next_tokens):
                                                     np.zeros([attention_mask.shape[0], 1], dtype=np.int32)], axis=-1)
     return model_inputs
 
+kv_cache = None
 def generate_greedy(model, input_ids, attention_mask, max_new_tokens, eos_token_id, pad_token_id, max_kv_len = 2048, streamer = None):
     model_inputs = {}
     batch_size = input_ids.shape[0]
@@ -21,7 +22,9 @@ def generate_greedy(model, input_ids, attention_mask, max_new_tokens, eos_token_
                      model.pipeline_config.n_head,
                      max_kv_len,
                      model.pipeline_config.head_size]
-    kv_cache = Tensor(model.input("kv_cache").get_element_type(), kvcache_shape)
+    global kv_cache
+    if not kv_cache or kv_cache.shape[1] != batch_size or kv_cache.shape[3] != max_kv_len:
+        kv_cache = Tensor(model.input("kv_cache").get_element_type(), kvcache_shape)
 
     # initialize "straight" beams in greedy search
     beam_table = np.zeros([batch_size, max_kv_len]).astype("int32")

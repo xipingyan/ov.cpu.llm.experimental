@@ -1,10 +1,10 @@
-from openvino.runtime import Core, Model, Tensor, PartialShape, Type, serialize, opset_utils
+from openvino.runtime import Core, Model, Tensor, PartialShape, Type, serialize, opset_utils, save_model
 from openvino.runtime import opset10 as opset
 import numpy as np
 import sys, os
 import argparse
 import time
-from utils import show_model, make_mha, make_fc, pt_as_np, make_rms_norm, make_embedding, save_tokenzier, OV_XML_FILE_NAME, configs as make_configs
+from utils import show_model, make_mha, make_fc, pt_as_np, make_rms_norm, make_embedding, save_tokenzier, OV_XML_FILE_NAME, configs as make_configs, swish
 from tqdm import tqdm
 
 def layer(configs, consts, layer_idx, hidden_states, kv_cache, beam_table, attn_mask, cos_tab, sin_tab):
@@ -30,7 +30,7 @@ def layer(configs, consts, layer_idx, hidden_states, kv_cache, beam_table, attn_
     # mlp
     def mlp(states):
         gate_proj = make_fc('model.layers.mlp.gate_proj', states, consts['layers'][layer_idx], name_suffix)
-        silu = opset.swish(gate_proj, name=f'{name_prefix}.mlp.silu{name_suffix}')
+        silu = swish(gate_proj, name=f'{name_prefix}.mlp.silu{name_suffix}')
         up_proj = make_fc('model.layers.mlp.up_proj', states, consts['layers'][layer_idx], name_suffix)
         mul = opset.multiply(silu, up_proj, auto_broadcast='numpy', name=f'{name_prefix}.mlp.mul{name_suffix}')
         down_proj = make_fc('model.layers.mlp.down_proj', mul, consts['layers'][layer_idx], name_suffix)
@@ -53,8 +53,8 @@ def create_model(configs, consts):
     # [batch, query_len+past_len]
     attn_mask = opset.parameter([-1, -1], Type.f32, name='attn_mask')
     # [max_kv_len, rotary_dims//2]
-    cos_tab = opset.parameter([-1, configs['rotary_dims'] // 2], Type.f32, name='cos_tab')
-    sin_tab = opset.parameter([-1, configs['rotary_dims'] // 2], Type.f32, name='sin_tab')
+    cos_tab = opset.parameter([-1, configs['rotary_dims']], Type.f32, name='cos_tab')
+    sin_tab = opset.parameter([-1, configs['rotary_dims']], Type.f32, name='sin_tab')
 
     inputs_embeds = make_embedding('model.embed_tokens.weight', input_ids, consts)
     hidden_states = inputs_embeds
@@ -133,24 +133,28 @@ if __name__ == "__main__":
     parser.add_argument('--compressed_weight', type=bool, nargs='?', default=False)
     parser.add_argument('--quant_type', type=str, nargs='?', default='')
     args = parser.parse_args()
+    quant_f16 = False
     # for compatible, will remove
     if args.compressed_weight:
         print(f'warning: please use "--quant=nncf_w8" instead.')
         if args.quant_type:
             raise ValueError('compressed_weight and quant_type can not be set at the same time.')
         args.quant_type = 'nncf_w8'
-    make_configs['quant_type'] = args.quant_type
 
     if args.quant_type:
         args.ov_model_path = os.path.join(args.ov_model_path, args.quant_type)
     os.makedirs(args.ov_model_path, exist_ok=True)
+    if args.quant_type == 'f16':
+        quant_f16 = True
+        args.quant_type = ''
+    make_configs['quant_type'] = args.quant_type
 
     configs, consts = get_params_from_model(args.org_model_path)
     model = create_model(configs, consts)
     show_model(model)
     print(f'serialize ov model to "{args.ov_model_path}"...')
     beg = time.time()
-    serialize(model, os.path.join(args.ov_model_path, OV_XML_FILE_NAME))
+    save_model(model, os.path.join(args.ov_model_path, OV_XML_FILE_NAME), quant_f16)
     cost = time.time() - beg
     print(f'serialize done, cost {cost:.2f} seconds.')
     print(f'save tokenzier to "{args.ov_model_path}" ...')

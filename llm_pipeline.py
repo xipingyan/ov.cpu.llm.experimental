@@ -23,7 +23,7 @@ class ModelConfig:
         self.n_layers = kv_cache_shape[0].get_length() // 2
         self.n_head = kv_cache_shape[2].get_length()
         self.head_size = kv_cache_shape[4].get_length()
-        self.rotary_dims = cos_tab_shape[1].get_length() * 2 # assumes sin/cos table dims is half of rotary_dims
+        self.rotary_dims = cos_tab_shape[1].get_length() # assumes sin/cos table dims is half of rotary_dims
 
     def __str__(self) -> str:
         return f"\tn_layers={self.n_layers}, n_head={self.n_head}, head_size={self.head_size}, rotary_dims={self.rotary_dims}"
@@ -120,8 +120,8 @@ if __name__ == "__main__":
     # Add an argument
     parser.add_argument('-m', '--model', type=str, required=True,
                         help="path to model directory, which contains OpenVINO model and tokenzier")
-    parser.add_argument('-pl', '--prompt-length', type=int, nargs='+', default=32, required=False,
-                        help="prompt length")
+    parser.add_argument('-pl', '--prompt-length', type=str, nargs='+', default=32, required=False,
+                        help="prompt length: batchxlength or length")
     parser.add_argument('-p', '--prompt', type=str, nargs='+', required=False,
                         help="prompt")
     parser.add_argument('-al', '--answer-length', type=int,
@@ -153,9 +153,6 @@ if __name__ == "__main__":
 
     # initialize openvino core
     core = Core()
-    custom_opset = opset_utils._get_node_factory()
-    custom_opset.add_extension(ext_path)
-    core.add_extension(ext_path)
     print("Init OpenVINO model ...")
     # read the model and corresponding weights from file
     ov_model = core.read_model(Path(args.model) / OV_XML_FILE_NAME)
@@ -179,33 +176,47 @@ if __name__ == "__main__":
     compiled_model.pipeline_config = ModelConfig(ov_model)
 
     prompts = {}
-    with open("prompts.json") as f:
-        prompts = json.load(f)
+    # with open("prompts.json") as f:
+    #     prompts = json.load(f)
 
     print("Start test ...")
+    def run_ntimes(args, text, tokenizer, compiled_model, enforce_input_tokens = None, streamer = None):
+        results = []
+        for round in range(args.repeat):
+            result = generate(args, text, tokenizer, compiled_model, enforce_input_tokens=enforce_input_tokens, streamer = streamer)
+            results.append(result)
+        return results
     benchmark_data = []
-    for round in range(args.repeat):
-        print(f"round {round}:")
-        if args.prompt:
-            if round == 0 and len(args.prompt) == 1:
-                # TextStreamer only supports batch size 1
-                streamer = TextStreamer(tokenizer)
-            else:
-                streamer = None
-            # prompt from command line
-            text = args.prompt
-            result = generate(args, text, tokenizer, compiled_model, streamer = streamer)
-        else:
-            # prompt from json config
-            for plen in args.prompt_length:
-                if str(plen) in prompts:
-                    text = prompts[str(plen)]
-                    result = generate(args, [text], tokenizer, compiled_model)
-                else:
-                    # Prompt with length {plen} is not provided in prompt.json, will forge"
-                    result = generate(args, ["Hi"], tokenizer, compiled_model, enforce_input_tokens=plen)
 
-        benchmark_data.append(result)
+    if args.prompt:
+        if args.repeat == 1 and len(args.prompt) == 1:
+            # TextStreamer only supports batch size 1
+            streamer = TextStreamer(tokenizer)
+        else:
+            streamer = None
+        # prompt from command line
+        text = args.prompt
+        print(f'testing prompt="{text[:16]}..."')
+        result = run_ntimes(args, text, tokenizer, compiled_model, streamer = streamer)
+        benchmark_data += result
+    else:
+        # prompt from json config
+        for plen_str in args.prompt_length:
+            plen_array = plen_str.split('x')
+            plen = int(plen_array[-1])
+            batch = 1
+            if len(plen_array) > 1:
+                batch = int(plen_array[0])
+            if str(plen) in prompts:
+                text = prompts[str(plen)]
+                print(f'testing prompt="{text[:16]}..."')
+                result = run_ntimes(args, text * batch, tokenizer, compiled_model)
+            else:
+                # Prompt with length {plen} is not provided in prompt.json, will forge"
+                print(f'testing batch={batch}, length={plen}...')
+                result = run_ntimes(args, ["Hi"] * batch, tokenizer, compiled_model, enforce_input_tokens=plen)
+
+            benchmark_data += result
 
     if args.output_results:
         with open(args.output_results, 'w', newline='') as f:
