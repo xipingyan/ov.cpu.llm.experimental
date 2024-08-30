@@ -61,6 +61,10 @@ def create_model(configs, consts):
 
     for i in tqdm(range(configs['layer_num'])):
         hidden_states = layer(configs, consts, i, hidden_states, kv_cache, beam_table, attn_mask, cos_tab, sin_tab)
+
+    # only keep the last token
+    hidden_states = opset.slice(hidden_states, np.array([-1]), np.array([np.iinfo(np.int32).max]), np.array([1]), np.array([1]))
+
     # final_layernorm
     final_layernorm = make_rms_norm('model.norm', hidden_states, consts, configs['rms_norm_eps'])
     # embed_out

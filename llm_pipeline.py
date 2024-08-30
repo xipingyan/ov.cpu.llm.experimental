@@ -11,7 +11,7 @@ from openvino.runtime import opset10 as opset
 from openvino.preprocess import PrePostProcessor
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from pipeline.greedy_search import generate_greedy
-from pipeline.beam_search import generate_beam
+from pipeline.beam_search import generate_beam, change_model_for_beam
 from models.utils import OV_XML_FILE_NAME
 
 class ModelConfig:
@@ -115,7 +115,7 @@ def generate(args, text, tokenizer, compiled_model, enforce_input_tokens = None,
     return benchmark_data
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     # Add an argument
     parser.add_argument('-m', '--model', type=str, required=True,
@@ -172,6 +172,11 @@ if __name__ == "__main__":
                 "ENABLE_HYPER_THREADING" : "YES" if args.hyper_threading else "NO",
                 "CACHE_DIR" : None}
 
+    if args.greedy:
+        pass
+    else:
+        ov_model = change_model_for_beam(ov_model, args.beam_size)
+
     compiled_model = core.compile_model(ov_model, "CPU", ov_config)
     compiled_model.pipeline_config = ModelConfig(ov_model)
 
@@ -224,3 +229,6 @@ if __name__ == "__main__":
             writer.writeheader()
             for data in benchmark_data:
                 writer.writerow(data)
+
+if __name__ == "__main__":
+    main()

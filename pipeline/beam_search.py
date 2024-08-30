@@ -2,9 +2,11 @@ import numpy as np
 import pipeline.utils
 import utils
 from openvino.runtime import Tensor, Type
+from openvino.runtime import opset11 as opset
 import time
 
-def topk(array, k, axis=-1, sorted=True):
+def topk(array, k, axis=-1):
+    sorted=True
     # Use np.argpartition is faster than np.argsort, but do not return the values in order
     # We use array.take because you can specify the axis
     partitioned_ind = (
@@ -28,22 +30,23 @@ def topk(array, k, axis=-1, sorted=True):
     else:
         ind = partitioned_ind
         scores = partitioned_scores
-    
     return scores, ind
 
-def process_logits(batch_size, num_beams, logits, scores):
-    next_token_logits = logits[:, -1, :]
-    next_token_scores = pipeline.utils.logsoftmax(next_token_logits)
-    next_token_scores = next_token_scores + scores[:, None]
+def process_logits(batch_size, num_beams, logits, beam_scores):
+    next_token_logits = logits[:, -1, :]                             # (batch_size*num_beams, 1, vocab_size)
+    next_token_scores = pipeline.utils.logsoftmax(next_token_logits) # (batch_size*num_beams, vocab_size)
+    next_token_scores = next_token_scores + beam_scores[:, None]     # (batch_size*num_beams, vocab_size) + (batch_size*num_beams,)
     vocab_size = next_token_scores.shape[-1]
-    next_token_scores = next_token_scores.reshape(batch_size, num_beams * vocab_size)
-    
+    next_token_scores = next_token_scores.reshape(batch_size, num_beams * vocab_size) # (batch_size, num_beams * vocab_size)
+
     next_token_scores, next_tokens = topk(
         next_token_scores, 2 * num_beams, axis=1
     )
+    # topk from `num_beams * vocab_size` possible next-tokens
+    #   (batch_size, 2 * num_beams) (batch_size, 2 * num_beams)
     next_indices = np.floor(next_tokens / vocab_size).astype("int32")
     next_tokens = next_tokens % vocab_size
-    
+
     return next_token_scores, next_tokens, next_indices
 
 
@@ -172,11 +175,7 @@ class BeamSearch():
             self._done[batch_idx] = self._done[batch_idx] or self._beam_hyps[batch_idx].is_done(
                 next_scores[batch_idx].max().item(), cur_len
             )
-        return  {
-                "next_beam_scores": next_beam_scores.reshape(-1),
-                "next_beam_tokens": next_beam_tokens.reshape(-1),
-                "next_beam_indices": next_beam_indices.reshape(-1),
-            }
+        return  next_beam_scores.reshape(-1), next_beam_tokens.reshape(-1), next_beam_indices.reshape(-1)
         
     def finalize(
         self,
@@ -279,7 +278,48 @@ def prepare_next_input(model_inputs, next_tokens):
                                                     np.zeros([attention_mask.shape[0], 1], dtype=np.int32)], axis=-1)
     return model_inputs
 
+def change_model_for_beam(model, beam_size):
+    
+    # print(type(model), dir(model))
+
+    result = model.get_result()
+    logits = result.input_value(0)
+
+    # logits : (batch*beam_size, 1, vocab_size)
+
+    #print(type(logits), dir(logits))
+    #print(logits.get_partial_shape())
+    #raise 1
+
+    topk_beams = beam_size * 2 # opset.parameter([], Type.i32, name='topk_beams')
+
+    oshape = opset.parameter([2], Type.i32, name='oshape')
+    oshape.output(0).set_names(set(['oshape']))
+
+    beam_scores = opset.parameter([-1], Type.f32, name='beam_scores')
+    beam_scores.output(0).set_names(set(['beam_scores']))
+    beam_scores_2d = opset.unsqueeze(beam_scores, np.int32([1]))
+
+    # post-processing for beam-search
+    logits_2d = opset.squeeze(logits, 1)                # (batch*beam_size, 1, vocab_size)
+    log_softmax = opset.log_softmax(logits_2d, axis=1)
+    h_lgsoftmax0 = opset.add(log_softmax, beam_scores_2d)
+
+    #vocab_size = consts['lm_head.weight'].shape[0]
+    #nbvoc = opset.multiply(num_beams, np.int32(vocab_size))
+
+    h_lgsoftmax = opset.reshape(h_lgsoftmax0, oshape, special_zero=True)
+    h_topk = opset.topk(h_lgsoftmax, topk_beams, axis=np.int32(-1), mode="max", sort="value")
+    next_score = opset.result(h_topk.output(0), name='next_score')
+    next_indicies = opset.result(h_topk.output(1), name='next_indicies')
+
+    model.add_parameters([oshape, beam_scores])
+    model.add_results([next_score, next_indicies])
+
+    return model
+
 kv_cache = None
+
 def generate_beam(model, input_ids, attention_mask, max_new_tokens, eos_token_id, pad_token_id, max_kv_len = 2048, beam_size = 4):
     """
     text prediction cycle.
@@ -293,6 +333,20 @@ def generate_beam(model, input_ids, attention_mask, max_new_tokens, eos_token_id
     Returns:
       predicted token ids sequence
     """
+    import os
+    BEAM_DEBUG = int(os.environ.get('BEAM_DEBUG', '0'))
+    loop_id = 0
+
+    def debug_log(*args, **kwargs):
+        nonlocal loop_id
+        if loop_id < BEAM_DEBUG:
+            print(f" =======[BEAM_DEBUG:{loop_id}]======= ", end="")
+            print(*args, **kwargs)
+        return
+
+    debug_log(model.inputs)
+    debug_log(model.outputs)
+
     model_inputs = {}
     batch_size = input_ids.shape[0]
     cur_len = prompt_length = input_ids.shape[1]
@@ -309,52 +363,106 @@ def generate_beam(model, input_ids, attention_mask, max_new_tokens, eos_token_id
     global_beam_idx = np.zeros([batch_size * num_beams, max_kv_len]).astype("int32")
     beam_table = np.zeros([batch_size * num_beams, max_kv_len]).astype("int32")
     sin_tab, cos_tab = pipeline.utils.create_sinusoidal_positions(max_kv_len, model.pipeline_config.rotary_dims)
-    # input_ids = np.repeat(input_ids, num_beams, axis=0)
+
+    org_input_ids = input_ids
+    input_ids = np.repeat(input_ids, num_beams, axis=0)
+
     original_attention_mask = attention_mask
     attention_mask = np.repeat(attention_mask, num_beams, axis=0)
+
     model_inputs = {"input_ids": input_ids,
                     "attn_mask": original_attention_mask,
                     "kv_cache": kv_cache,
                     "beam_table": beam_table,
                     "cos_tab": cos_tab,
-                    "sin_tab": sin_tab
+                    "sin_tab": sin_tab,
+                    "oshape" : np.array([batch_size, -1]),
+                    "beam_scores" : None,
                     }
+
     beam_searcher = BeamSearch(batch_size, num_beams)
-    beam_scores = np.zeros(
-        (batch_size, num_beams), dtype=np.float32
-    )
-    beam_scores[:, 1:] = -1e9
-    beam_scores = beam_scores.reshape((batch_size * num_beams,))
+
+    logits_output = next(iter(model.outputs))
+    vocab_size = logits_output.partial_shape[-1].get_length()
+
     latency = []
     while True:
+        loop_id += 1
+        
         time0 = time.time()
         cur_input_len = len(input_ids[0])
+
         if first_iteration:
-            first_iteration = False
+            model_inputs['input_ids'] = org_input_ids
             model_inputs['attn_mask'] = original_attention_mask
+            model_inputs['beam_scores'] = np.full((batch_size, ), 0, dtype=np.float32) # first iteration has only 1 beam per-batch
+
             outputs = model(model_inputs)
-            logits = next(iter(outputs.values()))
-            # broadcast batch 1 to num_beams
-            logits = np.repeat(logits, num_beams, axis=0)
-            model_inputs["attn_mask"] = attention_mask
-            input_ids = np.repeat(input_ids, num_beams, axis=0)
+            logits, next_score, next_indices = outputs.values()      # unpack outputs
+
+            # pretend that we have (batch_size * num_beams) results
+            model_inputs["attn_mask"] = np.repeat(original_attention_mask, num_beams, axis=0)
+            next_token_logits = np.repeat(logits, num_beams, axis=0)
+            beam_scores = np.full((batch_size*num_beams, ), -1e9, dtype=np.float32)
+            beam_scores[0::num_beams] = 0
         else:
             outputs = model(model_inputs)
-            logits = next(iter(outputs.values()))
-        
-        next_token_logits = logits   
+            next_token_logits, next_score, next_indices = outputs.values()      # unpack outputs
+
+        next_tokens = next_indices % vocab_size
+        next_indices = np.floor(next_indices / vocab_size).astype("int32")
+
+        debug_log(f"next_token_logits\n", next_token_logits)
         # pre-process distribution
-        next_token_scores, next_tokens, next_indices = process_logits(batch_size, num_beams, next_token_logits, beam_scores)
-        beam_outputs = beam_searcher.process(input_ids, next_token_scores, next_tokens, next_indices)
-        beam_scores = beam_outputs["next_beam_scores"]
-        beam_next_tokens = beam_outputs["next_beam_tokens"]
-        beam_idx = beam_outputs["next_beam_indices"]
+        # next_score, next_tokens, next_indices = process_logits(batch_size, num_beams, next_token_logits, beam_scores)
+
+        debug_log(f"next_score\n", next_score)
+        debug_log(f"next_tokens\n", next_tokens)
+        debug_log(f"next_indices\n", next_indices)
+
+        beam_scores, beam_next_tokens, beam_idx = beam_searcher.process(input_ids, next_score, next_tokens, next_indices)
+        debug_log(f"beam_scores\n", beam_scores)
+        debug_log(f"beam_next_tokens\n", beam_next_tokens)
+        debug_log(f"beam_idx\n", beam_idx)
+
+        if first_iteration:
+            for i in range(cur_len):
+                global_beam_idx[:, i] = beam_idx
         global_beam_idx[:, cur_len] = beam_idx
+        input_ids = np.concatenate([input_ids[beam_idx, :], np.expand_dims(beam_next_tokens, -1)], axis=-1)
+
+        debug_log(f"beam_idx  :", beam_idx)
+        debug_log(f"cur_len+1 :", cur_len+1)
+
         utils.update_beam_table(global_beam_idx, beam_table, cur_len+1)
         cur_len = cur_len + 1
 
-        input_ids = np.concatenate([input_ids[beam_idx, :], np.expand_dims(beam_next_tokens, -1)], axis=-1)
-        model_inputs = prepare_next_input(model_inputs, beam_next_tokens)
+        debug_log(f"global_beam_idx \n", global_beam_idx[:,:])
+        debug_log(f"beam_table 222222\n", beam_table[:,:])
+
+        #print(f" input_ids.shape={input_ids.shape} beam_idx={beam_idx} kv_cache={kv_cache.shape}")
+        # kvcache_shape = [2 * n_layers, batch_size * num_beams, n_head, max_kv_len, head_size]
+        debug_log(f"kv_cache = \n",  kv_cache.data[0,:,0, 0:8, 0])
+
+        # model_inputs = prepare_next_input(model_inputs, beam_next_tokens)
+        # def prepare_next_input(model_inputs, next_tokens):
+
+        # prepare_next_input
+        model_inputs['input_ids'] = np.array([beam_next_tokens]).reshape(-1, 1)
+
+        debug_log("input_ids for next\n", model_inputs['input_ids'])
+
+        if 'attn_mask' in model_inputs:
+            attention_mask = model_inputs['attn_mask']
+            model_inputs['attn_mask'] = np.concatenate([attention_mask,
+                                                        np.zeros([attention_mask.shape[0], 1], dtype=np.int32)], axis=-1)
+        if "beam_scores" in model_inputs:
+            model_inputs["beam_scores"] = beam_scores
+
+        if first_iteration:
+            debug_log("<===================================================================================== first_iteration is done!!!!!!!!!!!!!!!")
+        first_iteration = False
+
         latency.append(time.time() - time0)
         if cur_len == max_new_tokens + prompt_length:
             break

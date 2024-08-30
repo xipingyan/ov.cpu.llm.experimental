@@ -72,11 +72,15 @@ class OvLLMModel:
 
         core = Core()
         custom_opset = opset_utils._get_node_factory()
-        custom_opset.add_extension(ext_path)
-        core.add_extension(ext_path)
+
+        try:
+            custom_opset.add_extension(ext_path)
+            core.add_extension(ext_path)
+        except:
+            print(f"failed to load ov extension {ext_path}")
 
         print("Init OpenVINO model ...")
-        ov_model = core.read_model(os.path.join(ov_model_path, "openvino.xml"))
+        ov_model = core.read_model(os.path.join(ov_model_path, "openvino_model.xml"))
 
         # add preprocessor for bf16 kv_cache
         self.bf16 = False
@@ -128,6 +132,7 @@ class OvLLMModel:
                             "cos_tab": cos_tab,
                             "sin_tab": sin_tab
                             }
+        print(model_inputs)
         return self.compiled_model(model_inputs)
 
     def __str__(self) -> str:
@@ -160,7 +165,7 @@ def perplexity_ov(args, text, ov_model_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-f","--prompt-file", type=str, default="./wikitext-2-raw/wiki.test.raw")
+    parser.add_argument("-f","--prompt-file", type=str, default="./wiki.test.raw")
     parser.add_argument("-hf", type=str, default=None)
     parser.add_argument("-ov", type=str, default=None)
     args = parser.parse_args()
