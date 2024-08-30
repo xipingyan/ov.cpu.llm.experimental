@@ -279,6 +279,7 @@ def prepare_next_input(model_inputs, next_tokens):
                                                     np.zeros([attention_mask.shape[0], 1], dtype=np.int32)], axis=-1)
     return model_inputs
 
+kv_cache = None
 def generate_beam(model, input_ids, attention_mask, max_new_tokens, eos_token_id, pad_token_id, max_kv_len = 2048, beam_size = 4):
     """
     text prediction cycle.
@@ -302,7 +303,9 @@ def generate_beam(model, input_ids, attention_mask, max_new_tokens, eos_token_id
                      model.pipeline_config.n_head,
                      max_kv_len,
                      model.pipeline_config.head_size]
-    kv_cache = Tensor(model.input("kv_cache").get_element_type(), kvcache_shape)
+    global kv_cache
+    if not kv_cache or kv_cache.shape[1] != batch_size * num_beams or kv_cache.shape[3] != max_kv_len:
+        kv_cache = Tensor(model.input("kv_cache").get_element_type(), kvcache_shape)
     global_beam_idx = np.zeros([batch_size * num_beams, max_kv_len]).astype("int32")
     beam_table = np.zeros([batch_size * num_beams, max_kv_len]).astype("int32")
     sin_tab, cos_tab = pipeline.utils.create_sinusoidal_positions(max_kv_len, model.pipeline_config.rotary_dims)
@@ -334,6 +337,7 @@ def generate_beam(model, input_ids, attention_mask, max_new_tokens, eos_token_id
             # broadcast batch 1 to num_beams
             logits = np.repeat(logits, num_beams, axis=0)
             model_inputs["attn_mask"] = attention_mask
+            input_ids = np.repeat(input_ids, num_beams, axis=0)
         else:
             outputs = model(model_inputs)
             logits = next(iter(outputs.values()))
