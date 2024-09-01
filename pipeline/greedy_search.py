@@ -18,12 +18,12 @@ def generate_greedy(model, input_ids, attention_mask, max_new_tokens, eos_token_
     model_inputs = {}
     batch_size = input_ids.shape[0]
     kvcache_shape = [2 * model.pipeline_config.n_layers,
+                     max_kv_len,
                      batch_size,
                      model.pipeline_config.n_head,
-                     max_kv_len,
                      model.pipeline_config.head_size]
     global kv_cache
-    if not kv_cache or kv_cache.shape[1] != batch_size or kv_cache.shape[3] != max_kv_len:
+    if not kv_cache or (list(kv_cache.shape) != kvcache_shape):
         kv_cache = Tensor(model.input("kv_cache").get_element_type(), kvcache_shape)
 
     # initialize "straight" beams in greedy search

@@ -353,12 +353,12 @@ def generate_beam(model, input_ids, attention_mask, max_new_tokens, eos_token_id
     num_beams = beam_size
     first_iteration = True
     kvcache_shape = [2 * model.pipeline_config.n_layers,
+                     max_kv_len,
                      batch_size * num_beams,
                      model.pipeline_config.n_head,
-                     max_kv_len,
                      model.pipeline_config.head_size]
     global kv_cache
-    if not kv_cache or kv_cache.shape[1] != batch_size * num_beams or kv_cache.shape[3] != max_kv_len:
+    if not kv_cache or (list(kv_cache.shape) != kvcache_shape):
         kv_cache = Tensor(model.input("kv_cache").get_element_type(), kvcache_shape)
     global_beam_idx = np.zeros([batch_size * num_beams, max_kv_len]).astype("int32")
     beam_table = np.zeros([batch_size * num_beams, max_kv_len]).astype("int32")
@@ -442,7 +442,7 @@ def generate_beam(model, input_ids, attention_mask, max_new_tokens, eos_token_id
 
         #print(f" input_ids.shape={input_ids.shape} beam_idx={beam_idx} kv_cache={kv_cache.shape}")
         # kvcache_shape = [2 * n_layers, batch_size * num_beams, n_head, max_kv_len, head_size]
-        debug_log(f"kv_cache = \n",  kv_cache.data[0,:,0, 0:8, 0])
+        debug_log(f"kv_cache = \n",  kv_cache.data[0, 0:8, :,0, 0])
 
         # model_inputs = prepare_next_input(model_inputs, beam_next_tokens)
         # def prepare_next_input(model_inputs, next_tokens):

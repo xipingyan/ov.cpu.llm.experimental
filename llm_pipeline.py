@@ -19,9 +19,9 @@ class ModelConfig:
         kv_cache_shape = ov_model.input("kv_cache").partial_shape
         cos_tab_shape = ov_model.input("cos_tab").partial_shape
 
-        # 2*n_layers, B, H, L, S
+        # 2*n_layers, L, B, H, S
         self.n_layers = kv_cache_shape[0].get_length() // 2
-        self.n_head = kv_cache_shape[2].get_length()
+        self.n_head = kv_cache_shape[3].get_length()
         self.head_size = kv_cache_shape[4].get_length()
         self.rotary_dims = cos_tab_shape[1].get_length() # assumes sin/cos table dims is half of rotary_dims
 
@@ -171,6 +171,10 @@ def main():
                 "CPU_DENORMALS_OPTIMIZATION" : "YES",
                 "ENABLE_HYPER_THREADING" : "YES" if args.hyper_threading else "NO",
                 "CACHE_DIR" : None}
+
+    # beam_size 0 implies greedy search
+    if (args.beam_size == 0):
+        args.greedy = True
 
     if args.greedy:
         pass
