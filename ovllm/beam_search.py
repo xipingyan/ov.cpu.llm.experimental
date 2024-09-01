@@ -1,6 +1,5 @@
 import numpy as np
-import pipeline.utils
-import utils
+from . import utils, utils_cpp
 from openvino.runtime import Tensor, Type
 from openvino.runtime import opset11 as opset
 import time
@@ -34,7 +33,7 @@ def topk(array, k, axis=-1):
 
 def process_logits(batch_size, num_beams, logits, beam_scores):
     next_token_logits = logits[:, -1, :]                             # (batch_size*num_beams, 1, vocab_size)
-    next_token_scores = pipeline.utils.logsoftmax(next_token_logits) # (batch_size*num_beams, vocab_size)
+    next_token_scores = utils.logsoftmax(next_token_logits) # (batch_size*num_beams, vocab_size)
     next_token_scores = next_token_scores + beam_scores[:, None]     # (batch_size*num_beams, vocab_size) + (batch_size*num_beams,)
     vocab_size = next_token_scores.shape[-1]
     next_token_scores = next_token_scores.reshape(batch_size, num_beams * vocab_size) # (batch_size, num_beams * vocab_size)
@@ -362,7 +361,7 @@ def generate_beam(model, input_ids, attention_mask, max_new_tokens, eos_token_id
         kv_cache = Tensor(model.input("kv_cache").get_element_type(), kvcache_shape)
     global_beam_idx = np.zeros([batch_size * num_beams, max_kv_len]).astype("int32")
     beam_table = np.zeros([batch_size * num_beams, max_kv_len]).astype("int32")
-    sin_tab, cos_tab = pipeline.utils.create_sinusoidal_positions(max_kv_len, model.pipeline_config.rotary_dims)
+    sin_tab, cos_tab = utils.create_sinusoidal_positions(max_kv_len, model.pipeline_config.rotary_dims)
 
     org_input_ids = input_ids
     input_ids = np.repeat(input_ids, num_beams, axis=0)
@@ -434,7 +433,7 @@ def generate_beam(model, input_ids, attention_mask, max_new_tokens, eos_token_id
         debug_log(f"beam_idx  :", beam_idx)
         debug_log(f"cur_len+1 :", cur_len+1)
 
-        utils.update_beam_table(global_beam_idx, beam_table, cur_len+1)
+        utils_cpp.update_beam_table(global_beam_idx, beam_table, cur_len+1)
         cur_len = cur_len + 1
 
         debug_log(f"global_beam_idx \n", global_beam_idx[:,:])

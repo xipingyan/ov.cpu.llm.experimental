@@ -4,7 +4,7 @@ import numpy as np
 import sys, os
 import argparse
 import time
-from utils import show_model, make_mha, make_fc, pt_as_np, make_rms_norm, make_embedding, save_tokenzier, OV_XML_FILE_NAME, configs as make_configs, swish
+from .utils import show_model, make_mha, make_fc, pt_as_np, make_rms_norm, make_embedding, save_tokenzier, OV_XML_FILE_NAME, configs as make_configs, swish
 from tqdm import tqdm
 
 def layer(configs, consts, layer_idx, hidden_states, kv_cache, beam_table, attn_mask, cos_tab, sin_tab):

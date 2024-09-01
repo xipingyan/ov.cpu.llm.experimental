@@ -16,3 +16,5 @@ def test_update_beam_table():
 
     print(beam_idx)
     print(beam_tab)
+
+print("???????????")

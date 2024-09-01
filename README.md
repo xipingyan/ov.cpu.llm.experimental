@@ -34,7 +34,7 @@ Now we're ready to run the benchmarks using this model, again mounting that dire
 
 ```bash
 docker run --privileged --rm -v $HOME/models:/models -v $(pwd):/results -it openvino-llm \
-  python3 llm_pipeline.py -m /models/llama-2-7b-chat-ov/nncf_w8 --bf16 -r 3 --greedy -p "What is OpenVINO?" --output-results /results/results.csv
+  python3 -m ovllm -m /models/llama-2-7b-chat-ov/nncf_w8 --bf16 -r 3 --greedy -p "What is OpenVINO?" --output-results /results/results.csv
 ```
 
 A sample output is below:
@@ -128,37 +128,29 @@ pip3 install -e .
 ```
 
 ### 2.4. Model Conversion
-convert orginal model into OpenVINO FP32 IR:
+convert orginal model into OpenVINO ovllm IR:
 
 ```bash
-python models/gptj.py
-python models/gptneox.py
-python models/falcon.py
-python models/llama.py
-python models/chatglm2.py
-```
-convert orginal model into OpenVINO INT8 IR with weight compression:
-```bash
-python models/gptj.py --quant_type=Q4_1 # valid types: F16/Q8_C/Q4_C/Q8_0/Q4_0/Q4_1/nncf_w8
-python models/gptneox.py --quant_type=Q4_1
-python models/falcon.py --quant_type=Q4_1
-python models/llama.py --quant_type=Q4_1
-python models/chatglm2.py --quant_type=Q4_1
+python -m ovllm.export.gptj --quant_type=Q4_1 # valid types: F16/Q8_C/Q4_C/Q8_0/Q4_0/Q4_1/nncf_w8
+python -m ovllm.export.gptneox ...
+python -m ovllm.export.falcon
+python -m ovllm.export.llama
+python -m ovllm.export.chatglm2
 ```
 
 ### 2.5. Run Pipeline
 
 ```bash
 # greedy search:  f32/bf16 
-numactl -N 0 --membind=0  python llm_pipeline.py -m ./gen/gptj_6b/ -p "What's Oxygen?" -r 3 --greedy
-numactl -N 0 --membind=0  python llm_pipeline.py -m ./gen/gptj_6b/ -p "What's Oxygen?" -r 3 --greedy --bf16
+numactl -N 0 --membind=0  python -m ovllm -m ./gen/gptj_6b/ -p "What's Oxygen?" -r 3 --greedy
+numactl -N 0 --membind=0  python -m ovllm -m ./gen/gptj_6b/ -p "What's Oxygen?" -r 3 --greedy --bf16
 # beam search:  f32/bf16 
-numactl -N 0 --membind=0  python llm_pipeline.py -m ./gen/gptj_6b/ -p "What's Oxygen?" -r 3
-numactl -N 0 --membind=0  python llm_pipeline.py -m ./gen/gptj_6b/ -p "What's Oxygen?" -r 3 --bf16
+numactl -N 0 --membind=0  python -m ovllm -m ./gen/gptj_6b/ -p "What's Oxygen?" -r 3
+numactl -N 0 --membind=0  python -m ovllm -m ./gen/gptj_6b/ -p "What's Oxygen?" -r 3 --bf16
 # specific input token length (support multiple langth, multiple round)
-numactl -N 0 --membind=0  python llm_pipeline.py -m ./gen/gptj_6b/ -pl 32 512 1024 2016 8192 -r 3 --bf16
+numactl -N 0 --membind=0  python -m ovllm -m ./gen/gptj_6b/ -pl 32 512 1024 2016 8192 -r 3 --bf16
 # run on all numa nodes
-python llm_pipeline.py -m ./gen/falcon_40b -bs 1 --bf16 -pl 8000
+python -m ovllm -m ./gen/falcon_40b -bs 1 --bf16 -pl 8000
 ```
 
 # Quantization with experimental FC node
@@ -183,7 +175,7 @@ Inspired by excellent project [llama.cpp](https://github.com/ggerganov/llama.cpp
 
 ```bash
 # performance
-numactl -C0-15  python llm_pipeline.py -m ./gen/llama-2-7b-chat/Q8_0/ -p "I am retail store manager with new ice cream flavor Super Sweet White Coffee. Can you generate a twitter post to promote it?" -r 1 --greedy -al 32
+numactl -C0-15  python -m ovllm -m ./gen/llama-2-7b-chat/Q8_0/ -p "I am retail store manager with new ice cream flavor Super Sweet White Coffee. Can you generate a twitter post to promote it?" -r 1 --greedy -al 32
 
 # perplexity
 # download wikitext-2-raw from :
