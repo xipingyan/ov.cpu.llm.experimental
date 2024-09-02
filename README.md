@@ -151,6 +151,12 @@ numactl -N 0 --membind=0  python -m ovllm -m ./gen/gptj_6b/ -p "What's Oxygen?" 
 numactl -N 0 --membind=0  python -m ovllm -m ./gen/gptj_6b/ -pl 32 512 1024 2016 8192 -r 3 --bf16
 # run on all numa nodes
 python -m ovllm -m ./gen/falcon_40b -bs 1 --bf16 -pl 8000
+
+# test lambada_openai accuracy use lm-evaluation-harness
+#   pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
+
+python -m ovllm.lm_eval --model ovllm --tasks lambada_openai --model_args path=./ov.cpu.llm.experimental/gen/llama-2-7b-chat/f16/,nbatch=16
+
 ```
 
 # Quantization with experimental FC node

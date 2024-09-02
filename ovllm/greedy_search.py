@@ -2,18 +2,26 @@ import numpy as np
 from . import utils
 import time
 from openvino.runtime import Tensor, Type
+from openvino.runtime import opset11 as opset
 
-def prepare_next_input(model_inputs, next_tokens):
-    model_inputs['input_ids'] = np.array(next_tokens[..., np.newaxis])
+def change_model_for_greedy(model):
+    result = model.get_result()
+    logits = result.input_value(0)
+    # logits : (batch*beam_size, 1, vocab_size)
 
-    if 'attn_mask' in model_inputs:
-        attention_mask = model_inputs['attn_mask']
-        model_inputs['attn_mask'] = np.concatenate([attention_mask,
-                                                    np.zeros([attention_mask.shape[0], 1], dtype=np.int32)], axis=-1)
-    return model_inputs
+    topk_K = opset.parameter([], Type.i32, name='topk_K')
+    topk_K.output(0).set_names(set(['topk_K']))
+
+    h_topk = opset.topk(logits, topk_K, axis=np.int32(-1), mode="max", sort="value")
+    next_score = opset.result(h_topk.output(0), name='next_score')
+    next_indicies = opset.result(h_topk.output(1), name='next_indicies')
+
+    model.add_parameters([topk_K])
+    model.add_results([next_score, next_indicies])
+    return model
 
 kv_cache = None
-def generate_greedy(model, input_ids, attention_mask, max_new_tokens, eos_token_id, pad_token_id, max_kv_len = 2048, streamer = None):
+def generate_greedy(model, input_ids, attention_mask, max_new_tokens, eos_token_id, pad_token_id, max_kv_len = 2048, streamer = None, continuation = None):
     model_inputs = {}
     batch_size = input_ids.shape[0]
     kvcache_shape = [2 * model.pipeline_config.n_layers,
@@ -36,7 +44,8 @@ def generate_greedy(model, input_ids, attention_mask, max_new_tokens, eos_token_
                     "kv_cache": kv_cache,
                     "beam_table": beam_table,
                     "cos_tab": cos_tab,
-                    "sin_tab": sin_tab
+                    "sin_tab": sin_tab,
+                    "topk_K" : np.int32(1),
                     }
     latency = []
     cur_len = 0
@@ -51,12 +60,26 @@ def generate_greedy(model, input_ids, attention_mask, max_new_tokens, eos_token_
         time0 = time.time()
         outputs = model(model_inputs)
 
-        logits = next(iter(outputs.values()))
+        logits, next_score, next_indicies = outputs.values()
+
         next_token_logits = logits[:, -1, :]
         
         # pre-process distribution
         next_tokens_scores = next_token_logits
-        next_tokens = np.argmax(next_tokens_scores, axis=-1)
+        # next_tokens = np.argmax(next_tokens_scores, axis=-1)
+        next_tokens = next_indicies[:,0,0]
+
+        if continuation:
+            # next token has been determined by continuation_tokens
+            # collect logprobs and replace next
+            logprobs = utils.logsoftmax(next_token_logits)
+            for b in range(logprobs.shape[0]):
+                if cur_len < len(continuation.tokens[b]):
+                    expect_tok = continuation.tokens[b][cur_len]
+                    continuation.logprobs[b] += logprobs[b, expect_tok]
+                    continuation.is_greedy[b] = continuation.is_greedy[b] & (next_tokens[b] == expect_tok)
+                    # replace next token with expected one
+                    next_tokens[b] = expect_tok
         # get next token id
         # break the loop if max length or end of text token is reached
         cur_len = cur_len + 1
@@ -67,7 +90,13 @@ def generate_greedy(model, input_ids, attention_mask, max_new_tokens, eos_token_
         if streamer and len(next_tokens) == 1:
             streamer.put(next_tokens)
         input_ids = np.concatenate((input_ids, next_tokens[:, None]), axis=-1)
-        model_inputs = prepare_next_input(model_inputs, next_tokens)
+
+        model_inputs['input_ids'] = np.array(next_tokens[..., np.newaxis])
+        if 'attn_mask' in model_inputs:
+            attention_mask = model_inputs['attn_mask']
+            model_inputs['attn_mask'] = np.concatenate([attention_mask,
+                                                        np.zeros([attention_mask.shape[0], 1], dtype=np.int32)], axis=-1)        
+
         latency.append(time.time() - time0)
 
     if streamer:
