@@ -34,9 +34,7 @@ def generate_greedy(model, input_ids, attention_mask, max_new_tokens, eos_token_
         kv_cache = Tensor(model.input("kv_cache").get_element_type(), kvcache_shape)
 
     # initialize "straight" beams in greedy search
-    beam_table = np.zeros([batch_size, max_kv_len]).astype("int32")
-    for b in range(batch_size):
-        beam_table[b, :] = b
+    beam_table = np.zeros([0, max_kv_len]).astype("int32")
 
     sin_tab, cos_tab = utils.create_sinusoidal_positions(max_kv_len, model.pipeline_config.rotary_dims)
     model_inputs = {"input_ids": input_ids,
