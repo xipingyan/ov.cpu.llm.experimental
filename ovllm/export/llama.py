@@ -4,7 +4,7 @@ import numpy as np
 import sys, os
 import argparse
 import time
-from .utils import show_model, make_mha, make_fc, pt_as_np, make_rms_norm, make_embedding, save_tokenzier, OV_XML_FILE_NAME, configs as make_configs, swish
+from .utils import show_model, make_mha, make_fc, make_combined_fc, pt_as_np, make_rms_norm, make_embedding, save_tokenzier, OV_XML_FILE_NAME, configs as make_configs, swish
 from tqdm import tqdm
 
 def layer(configs, consts, layer_idx, hidden_states, kv_cache, beam_table, attn_mask, cos_tab, sin_tab):
@@ -13,12 +13,17 @@ def layer(configs, consts, layer_idx, hidden_states, kv_cache, beam_table, attn_
     # layerNorm operation
     input_layernorm = make_rms_norm('model.layers.input_layernorm', hidden_states, consts['layers'][layer_idx], configs['rms_norm_eps'], name_suffix)
 
-    q = make_fc('model.layers.self_attn.q_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
-    k = make_fc('model.layers.self_attn.k_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
-    v = make_fc('model.layers.self_attn.v_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
+    if 0:
+        q = make_fc('model.layers.self_attn.q_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
+        k = make_fc('model.layers.self_attn.k_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
+        v = make_fc('model.layers.self_attn.v_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
+        inputs = [q, k, v]
+    else:
+        qkv = make_combined_fc(['model.layers.self_attn.q_proj', 'model.layers.self_attn.k_proj', 'model.layers.self_attn.v_proj'], input_layernorm, consts['layers'][layer_idx], name_suffix)
+        inputs = [qkv]
 
     # custom op
-    attn_output = make_mha([q, k, v], kv_cache, beam_table, attn_mask, cos_tab, sin_tab,
+    attn_output = make_mha(inputs, kv_cache, beam_table, attn_mask, cos_tab, sin_tab,
                            layer_idx, configs['rotary_dims'], configs['hidden_size'], configs['head_num'],
                            name=f'{name_prefix}.mha{name_suffix}')
 

@@ -180,6 +180,30 @@ def make_fc(key, input, consts, name_suffix=''):
 
     return matmul
 
+def make_combined_fc(keys, input, consts, name_suffix=''):
+    weight_list = [consts[f'{key}.weight'] for key in keys]
+    new_weight = np.concatenate(weight_list, axis=0)
+    new_key = f'{keys[0]}kv.weight'
+    if configs['quant_type'] == 'nncf_w8':
+        weights = _make_compressed_weight_nncf(new_weight, new_key)
+    elif configs['quant_type'] == '':
+        weights = Constant(new_weight, True)
+        weights.set_friendly_name(name=f'{new_key}.weight{name_suffix}')
+    elif configs['quant_type'] == 'f16':
+        weight_f16 = new_weight.astype(np.float16)
+        weight_node = Constant(weight_f16, True)
+        weight_node.set_friendly_name(name=f'{new_key}.weight{name_suffix}')
+        weights = opset.convert(weight_node, 'f32', name=f'{new_key}.weight{name_suffix}.convert')
+    else:
+        raise Exception(f"Unknown quant type: {configs['quant_type']}")
+    matmul = opset.matmul(input, weights, transpose_a=False, transpose_b=True, name=f'{new_key}.matmul{name_suffix}')
+
+    # add bias
+    for key in keys:
+        assert consts[f'{key}.bias'] is None, 'there should be no bias in combined fc mode'
+
+    return matmul
+
 def make_mvn(key, input, consts, configs, name_suffix=''):
     mvn = opset.mvn(input, axes=[-1], normalize_variance=True, eps=configs['layer_norm_eps'], eps_mode="inside_sqrt", name=f'{key}.mvn{name_suffix}')
     if consts[f'{key}.weight'] is not None:
