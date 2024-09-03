@@ -94,13 +94,7 @@ def _arguments_as_outputs(arguments: List[Union[Node, Output]]) -> List[Output]:
 
 def make_mha(qkvs, kv_cache, beam_table, attn_mask, cos_tab, sin_tab,
              layer_idx, rotary_dim, n_hidden, n_head, name, num_kv_heads=0, rope_type='modified', multi_query_is_planar=False):
-    qkvs_len = len(qkvs)
-    mha_attr = {'arg_kv_cache': qkvs_len,
-                'arg_beam_table': qkvs_len + 1,
-                'arg_attn_mask': qkvs_len + 2,
-                'arg_cos': qkvs_len + 3,
-                'arg_sin': qkvs_len + 4,
-                'layer_id': layer_idx,
+    mha_attr = {'layer_id': layer_idx,
                 'rotary_dims': rotary_dim,
                 'n_hidden': n_hidden,
                 'n_head': n_head,
@@ -108,16 +102,7 @@ def make_mha(qkvs, kv_cache, beam_table, attn_mask, cos_tab, sin_tab,
                 'multi_query_is_planar': multi_query_is_planar,
                 'rope_type': ['original', 'modified'].index(rope_type)}
 
-    if qkvs_len == 1:
-        mha_attr['arg_q'] = 0
-        mha_attr['arg_k'] = 0
-        mha_attr['arg_v'] = 0
-    else:
-        mha_attr['arg_q'] = 0
-        mha_attr['arg_k'] = 1
-        mha_attr['arg_v'] = 2
-
-    output = mha(_arguments_as_outputs([*qkvs, kv_cache, beam_table, attn_mask, cos_tab, sin_tab]), mha_attr)
+    output = mha(_arguments_as_outputs([kv_cache, beam_table, attn_mask, cos_tab, sin_tab, *qkvs]), mha_attr)
     output.set_friendly_name(name)
     return output
 
