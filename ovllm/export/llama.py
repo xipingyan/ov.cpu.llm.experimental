@@ -13,7 +13,7 @@ def layer(configs, consts, layer_idx, hidden_states, kv_cache, beam_table, attn_
     # layerNorm operation
     input_layernorm = make_rms_norm('model.layers.input_layernorm', hidden_states, consts['layers'][layer_idx], configs['rms_norm_eps'], name_suffix)
 
-    if 0:
+    if not make_configs["fuse_qkv"]:
         q = make_fc('model.layers.self_attn.q_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
         k = make_fc('model.layers.self_attn.k_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
         v = make_fc('model.layers.self_attn.v_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
@@ -137,10 +137,11 @@ def get_params_from_model(path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('')
-    parser.add_argument('--org_model_path', type=str, default='Model ID (can be a Hugginface Hub id, or a local directory)')
+    parser.add_argument('--org_model_path', type=str, default='meta-llama/Llama-2-7b-hf', choices=['meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-13b-hf'])
     parser.add_argument('--ov_model_path', type=str, nargs='?', default='./gen/llama-2-7b-chat/')
     parser.add_argument('--compressed_weight', type=bool, nargs='?', default=False)
-    parser.add_argument('--quant_type', type=str, nargs='?', default='')
+    parser.add_argument('--quant_type', type=str, nargs='?', default='', choices=['','f16','nncf_w8'])
+    parser.add_argument("--fuse-qkv", action="store_true", help="fuse Q/K/V Linear projections into single Linear")
     args = parser.parse_args()
     quant_f16 = False
     # for compatible, will remove
@@ -157,6 +158,11 @@ if __name__ == "__main__":
         quant_f16 = True
         args.quant_type = ''
     make_configs['quant_type'] = args.quant_type
+    make_configs["fuse_qkv"] = args.fuse_qkv
+
+    print(f'make_configs:')
+    for k, v in make_configs.items():
+        print(f'	{k}: {v}')
 
     configs, consts = get_params_from_model(args.org_model_path)
     model = create_model(configs, consts)

@@ -147,7 +147,10 @@ class OVLLM(object):
         average_token_latency = sum(latency[2:])/(n_latency-2)
         overhead_latency = gen_latency - token_total
         
-        print(f"  [{input_batch_size}x{self.beam_size}, {input_token_len:4}+{gen_sequence_length}]  {gen_latency*1e3:.1f}ms = {latency[0]*1e3:.1f}ms + {latency[1]*1e3:.1f}ms + ({average_token_latency*1e3:.1f}ms x {n_latency-2}) + {overhead_latency * 1e3:.1f}ms")
+        tok_tput_1st = input_batch_size * input_token_len / latency[0]
+        tok_tput_2nd = input_batch_size * gen_sequence_length / sum(latency[1:])
+
+        print(f"  [{input_batch_size}x{self.beam_size}, {input_token_len:4}+{gen_sequence_length}]  {gen_latency*1e3:.1f}ms = [{latency[0]*1e3:.1f}ms  {tok_tput_1st:.1f}tok/s] + [{latency[1]*1e3:.1f}ms + ({average_token_latency*1e3:.1f}ms x {n_latency-2})  {tok_tput_2nd:.1f}tok/s] + [{overhead_latency * 1e3:.1f}ms]")
 
         text_key = ",".join(text)
 
