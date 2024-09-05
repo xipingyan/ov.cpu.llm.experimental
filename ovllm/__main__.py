@@ -1,36 +1,34 @@
 import argparse
-import json
 import time
-import hashlib
-import numpy as np
 import sys
 import csv
 from pathlib import Path
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from contextlib import nullcontext
 
-from .llm import OVLLM
+import multiprocessing
+import numa
 
-def main():
-    parser = argparse.ArgumentParser()
-    # Add an argument
-    parser.add_argument('-m', '--model', type=str, required=True,
-                        help="path to model directory, which contains OpenVINO model and tokenzier")
-    parser.add_argument('-pl', '--prompt-length', type=str, nargs='+', required=False,
-                        help="prompt length: batchxlength or length")
-    parser.add_argument('-p', '--prompt', type=str, nargs='+', required=False,
-                        help="prompt")
-    parser.add_argument('-al', '--answer-length', type=int,
-                        default=32, help="generated token length")
-    parser.add_argument("--greedy", action="store_true")
-    parser.add_argument("--bf16", action="store_true")
-    parser.add_argument("-bs", "--beam-size", type=int, default=0)
-    parser.add_argument("-r", "--repeat", type=int, default=1)
-    parser.add_argument("-ht", "--hyper-threading", action="store_true")
-    parser.add_argument("--output-results", type=str, help="Output results to CSV file")
-    parser.add_argument("-v", "--viztracer", action="store_true")
-    # Parse the argument
-    args = parser.parse_args()
+class WorkSync:
+    def __init__(self, total_workers):
+        self.barrier = multiprocessing.Barrier(total_workers)
+        self.manager = multiprocessing.Manager()
+        self.fps = self.manager.dict()
+        
+    def set_fps(self, key, fps):
+        self.fps[key] = fps
+
+    def sync(self):
+        self.barrier.wait()
+
+def main(args, wsync = None, numa_node = None, is_master = True):
+
+    title_tag = ""
+    if numa_node is not None:
+        numa.schedule.run_on_nodes(numa_node)
+        numa.memory.set_membind_nodes(numa_node)
+        title_tag = f"NUMA #{numa_node}"
+
+    from .llm import OVLLM
 
     if args.viztracer:
         from viztracer import VizTracer
@@ -45,7 +43,7 @@ def main():
             print(f"Sample code not supported on platform: {sys.platform}")
             exit(1)
 
-        ovllm = OVLLM(args.model, args.beam_size, args.bf16, args.hyper_threading)
+        ovllm = OVLLM(args.model, args.beam_size, args.bf16, args.hyper_threading, title_tag)
 
         if not args.prompt and not args.prompt_length:
             # nothing specified, will do a smoke test
@@ -59,7 +57,21 @@ def main():
         def run_ntimes(args, text, enforce_input_tokens = None, streamer = None):
             results = []
             for round in range(args.repeat):
+                wsync.sync()
+
                 result = ovllm.generate(text, new_token_length=args.answer_length, enforce_input_tokens=enforce_input_tokens, streamer = streamer)
+
+                wsync.set_fps(numa_node, result['tok_tput_2nd'])
+                wsync.sync()
+                if is_master:
+                    fps_details = ""
+                    total_fps = 0
+                    for k in wsync.fps:
+                        fps = wsync.fps[k]
+                        fps_details += f"{fps:.1f} (NUMA-{k})"
+                        total_fps += fps
+                    print(f"==================== [{fps_details}]  Total FPS (2nd token thoughput): {total_fps:.1f}")
+
                 results.append(result)
             return results
         benchmark_data = []
@@ -67,7 +79,7 @@ def main():
         if args.prompt:
             if args.repeat == 1 and len(args.prompt) == 1:
                 # TextStreamer only supports batch size 1
-                streamer = TextStreamer(ovllm.tokenizer)
+                streamer = None # TextStreamer(ovllm.tokenizer)
             else:
                 streamer = None
             # prompt from command line
@@ -102,4 +114,41 @@ def main():
                 writer.writerow(data)
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    # Add an argument
+    parser.add_argument('-m', '--model', type=str, required=True,
+                        help="path to model directory, which contains OpenVINO model and tokenzier")
+    parser.add_argument('-pl', '--prompt-length', type=str, nargs='+', required=False,
+                        help="prompt length: batchxlength or length")
+    parser.add_argument('-p', '--prompt', type=str, nargs='+', required=False,
+                        help="prompt")
+    parser.add_argument('-al', '--answer-length', type=int,
+                        default=32, help="generated token length")
+    parser.add_argument("--greedy", action="store_true")
+    parser.add_argument("-bf16", "--bf16", action="store_true")
+    parser.add_argument("-bs", "--beam-size", type=int, default=0)
+    parser.add_argument("-r", "--repeat", type=int, default=1)
+    parser.add_argument("-ht", "--hyper-threading", action="store_true")
+    parser.add_argument("--output-results", type=str, help="Output results to CSV file")
+    parser.add_argument("-v", "--viztracer", action="store_true")
+    parser.add_argument('-numa', '--numa', type=int, nargs='+')
+    # Parse the argument
+    args = parser.parse_args()
+
+    if args.numa:
+        numa_cnt = len(args.numa)
+        wsync = WorkSync(numa_cnt)
+        worker_process_list = []
+        for i in range(1, numa_cnt):
+            wp = multiprocessing.Process(target=main, args=(args, wsync, args.numa[i], False))
+            worker_process_list.append(wp)
+
+        for wp in worker_process_list:
+            wp.start()
+
+        main(args, wsync, args.numa[0], True)
+
+        for wp in worker_process_list:
+            wp.join()
+    else:
+        main(args)

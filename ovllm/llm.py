@@ -9,6 +9,7 @@ from pathlib import Path
 from openvino.runtime import Core, Model, Tensor, PartialShape, Type, serialize, opset_utils
 from openvino.runtime import opset10 as opset
 from openvino.preprocess import PrePostProcessor
+import openvino.runtime as ovrt
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from .greedy_search import generate_greedy, change_model_for_greedy
 from .beam_search import generate_beam, change_model_for_beam
@@ -30,13 +31,15 @@ class ModelConfig:
 
 def post_processing(result, input_text): 
     """post processing the model output"""
-    ans = result
     if result[:len(input_text)] == input_text:
-        ans = result[len(input_text):]
+        ans = "..." + result[len(input_text):]
+    else:
+        ans = result
     return ans
 
 class OVLLM(object):
-    def __init__(self, model_path, beam_size = 0, use_infer_prec_bf16 = True, hyper_threading = False):
+    def __init__(self, model_path, beam_size = 0, use_infer_prec_bf16 = True, hyper_threading = False, title_tag = ""):
+        self.title_tag = f"[{title_tag} {ovrt.get_version()}]"
         # load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
@@ -47,7 +50,7 @@ class OVLLM(object):
 
         # initialize openvino core
         self.core = Core()
-        print("Init OpenVINO model ...")
+        print(f"{self.title_tag} Init OpenVINO model ...")
         # read the model and corresponding weights from file
         self.ov_model = self.core.read_model(Path(model_path) / OV_XML_FILE_NAME)
 
@@ -150,7 +153,7 @@ class OVLLM(object):
         tok_tput_1st = input_batch_size * input_token_len / latency[0]
         tok_tput_2nd = input_batch_size * gen_sequence_length / sum(latency[1:])
 
-        print(f"  [{input_batch_size}x{self.beam_size}, {input_token_len:4}+{gen_sequence_length}]  {gen_latency*1e3:.1f}ms = [{latency[0]*1e3:.1f}ms  {tok_tput_1st:.1f}tok/s] + [{latency[1]*1e3:.1f}ms + ({average_token_latency*1e3:.1f}ms x {n_latency-2})  {tok_tput_2nd:.1f}tok/s] + [{overhead_latency * 1e3:.1f}ms]")
+        print(f"{self.title_tag}  [{input_batch_size}x{self.beam_size}, {input_token_len:4}+{gen_sequence_length}]  {gen_latency*1e3:.1f}ms = [{latency[0]*1e3:.1f}ms  {tok_tput_1st:.1f}tok/s] + [{latency[1]*1e3:.1f}ms + ({average_token_latency*1e3:.1f}ms x {n_latency-2})  {tok_tput_2nd:.1f}tok/s] + [{overhead_latency * 1e3:.1f}ms]")
 
         text_key = ",".join(text)
 
@@ -158,10 +161,10 @@ class OVLLM(object):
             self.last_output_text_map[text_key] = output_text
             for i, out in enumerate(output_text):
                 md5sum = hashlib.md5(out.encode('utf-8')).hexdigest()
-                console_out = post_processing(out, text)
+                console_out = post_processing(out, text[i])
                 if len(console_out) > 160:
                     console_out = console_out[:80] + "..." + md5sum
-                print(f"\t{i}. {[console_out]}")
+                print(f"\t{i}. {console_out}")
 
         benchmark_data = {
             'input_batch_size': input_batch_size,
@@ -171,7 +174,9 @@ class OVLLM(object):
             'token_latency_first_ms': latency[0] * 1e3,
             'average_token_latency_ms': average_token_latency * 1e3,
             'overhead_ms': overhead_latency * 1e3,
-            'output': post_processing(output_text[0], text)
+            'output': post_processing(output_text[0], text),
+            'tok_tput_1st' : tok_tput_1st,
+            'tok_tput_2nd' : tok_tput_2nd,
         }
 
         return benchmark_data
