@@ -4,7 +4,7 @@ from tqdm import tqdm
 from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
 
-from .llm import OVLLM
+from .greedy_search import OVLLMGreedy
 import numpy as np
 
 class Continuation:
@@ -20,7 +20,7 @@ class Continuation:
 class OVLLMModel(LM):
     def __init__(self, path, nbatch=1, nbeam = 0, bf16 = True, **kwargs):
         super().__init__()
-        self.ovllm = OVLLM(path, nbeam, bf16)
+        self.ovllm = OVLLMGreedy(path, bf16)
         self.nbatch = nbatch
 
     def loglikelihood(self, requests, disable_tqdm: bool = False):
@@ -59,7 +59,7 @@ class OVLLMModel(LM):
 
             c = Continuation(continuations)
 
-            self.ovllm.generate(conexts, 10, continuation = c)
+            self.ovllm.generate(conexts, 10, beam_size = 0, continuation = c)
 
             for logprob, is_greedy in zip(c.logprobs, c.is_greedy):
                 res.append((logprob, is_greedy))

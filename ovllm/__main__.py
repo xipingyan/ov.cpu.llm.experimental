@@ -14,11 +14,19 @@ class WorkSync:
         self.manager = multiprocessing.Manager()
         self.fps = self.manager.dict()
         
-    def set_fps(self, key, fps):
-        self.fps[key] = fps
-
-    def sync(self):
+    def sync_fps(self, numa_node, fps, is_master):
+        self.fps[numa_node] = fps
         self.barrier.wait()
+        if is_master:
+            fps_details = ""
+            total_fps = 0
+            for k in wsync.fps:
+                fps = wsync.fps[k]
+                fps_details += f"{fps:.1f} (NUMA-{k})"
+                total_fps += fps
+            print(f"==================== [{fps_details}]  Total FPS (2nd token thoughput): {total_fps:.1f}")
+        self.barrier.wait()
+        
 
 def main(args, wsync = None, numa_node = None, is_master = True):
 
@@ -28,7 +36,8 @@ def main(args, wsync = None, numa_node = None, is_master = True):
         numa.memory.set_membind_nodes(numa_node)
         title_tag = f"NUMA #{numa_node}"
 
-    from .llm import OVLLM
+    from .greedy_search import OVLLMGreedy
+    from .beam_search import OVLLMBeamSearch
 
     if args.viztracer:
         from viztracer import VizTracer
@@ -43,7 +52,10 @@ def main(args, wsync = None, numa_node = None, is_master = True):
             print(f"Sample code not supported on platform: {sys.platform}")
             exit(1)
 
-        ovllm = OVLLM(args.model, args.beam_size, args.bf16, args.hyper_threading, title_tag)
+        if args.beam_size == 0:
+            ovllm = OVLLMGreedy(args.model, args.bf16, args.hyper_threading, title_tag)
+        else:
+            ovllm = OVLLMBeamSearch(args.model, args.bf16, args.hyper_threading, title_tag)
 
         if not args.prompt and not args.prompt_length:
             # nothing specified, will do a smoke test
@@ -57,21 +69,9 @@ def main(args, wsync = None, numa_node = None, is_master = True):
         def run_ntimes(args, text, enforce_input_tokens = None, streamer = None):
             results = []
             for round in range(args.repeat):
-                wsync.sync()
-
-                result = ovllm.generate(text, new_token_length=args.answer_length, enforce_input_tokens=enforce_input_tokens, streamer = streamer)
-
-                wsync.set_fps(numa_node, result['tok_tput_2nd'])
-                wsync.sync()
-                if is_master:
-                    fps_details = ""
-                    total_fps = 0
-                    for k in wsync.fps:
-                        fps = wsync.fps[k]
-                        fps_details += f"{fps:.1f} (NUMA-{k})"
-                        total_fps += fps
-                    print(f"==================== [{fps_details}]  Total FPS (2nd token thoughput): {total_fps:.1f}")
-
+                result = ovllm.generate(text, beam_size=args.beam_size, new_token_length=args.answer_length, enforce_input_tokens=enforce_input_tokens, streamer = streamer)
+                if wsync:
+                    wsync.sync_fps(numa_node, result['tok_tput_2nd'], is_master)
                 results.append(result)
             return results
         benchmark_data = []

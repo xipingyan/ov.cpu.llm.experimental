@@ -11,9 +11,8 @@ from openvino.runtime import opset10 as opset
 from openvino.preprocess import PrePostProcessor
 import openvino.runtime as ovrt
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
-from .greedy_search import generate_greedy, change_model_for_greedy
-from .beam_search import generate_beam, change_model_for_beam
 from .export.utils import OV_XML_FILE_NAME
+from abc import ABC, abstractmethod
 
 class ModelConfig:
     def __init__(self, ov_model) -> None:
@@ -37,8 +36,39 @@ def post_processing(result, input_text):
         ans = result
     return ans
 
-class OVLLM(object):
-    def __init__(self, model_path, beam_size = 0, use_infer_prec_bf16 = True, hyper_threading = False, title_tag = ""):
+class OVLLM(ABC):
+    def _patch_model(self, model):
+        result = model.get_result()
+        logits = result.input_value(0)
+        # logits : (batch*beam_size, 1, vocab_size)
+
+        topk_K = opset.parameter([], Type.i32, name='topk_K')
+        topk_K.output(0).set_names(set(['topk_K']))
+
+        h_topk = opset.topk(logits, topk_K, axis=np.int32(-1), mode="max", sort="value")
+        next_score = opset.result(h_topk.output(0), name='next_score')
+        next_indicies = opset.result(h_topk.output(1), name='next_indicies')
+
+        model.add_parameters([topk_K])
+        model.add_results([next_score, next_indicies])
+        return model
+
+    @abstractmethod
+    def _generate(self,
+                  compiled_model,
+                  kv_cache,
+                  eos_token_id,
+                  pad_token_id,
+                  input_ids,
+                  attention_mask,
+                  beam_size,
+                  max_new_tokens,
+                  max_kv_len,
+                  streamer,
+                  continuation):
+        pass
+
+    def __init__(self, model_path, use_infer_prec_bf16 = True, hyper_threading = False, title_tag = ""):
         self.title_tag = f"[{title_tag} {ovrt.get_version()}]"
         # load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
@@ -56,30 +86,28 @@ class OVLLM(object):
 
         # add preprocessor for bf16 kv_cache
         if use_infer_prec_bf16:
-            kv_cache_precision = Type.bf16
+            self.kv_cache_precision = Type.bf16
             ppp = PrePostProcessor(self.ov_model)
             for key in self.ov_model.inputs:
-                if "kv_cache" in key.get_any_name() and kv_cache_precision != key.get_element_type():
-                    ppp.input(key.get_any_name()).tensor().set_element_type(kv_cache_precision)
+                if "kv_cache" in key.get_any_name() and self.kv_cache_precision != key.get_element_type():
+                    ppp.input(key.get_any_name()).tensor().set_element_type(self.kv_cache_precision)
             self.ov_model = ppp.build()
-        
+        else:
+            self.kv_cache_precision = self.ov_model.input("kv_cache").get_element_type()
+
         ov_config={"PERFORMANCE_HINT": "LATENCY", "NUM_STREAMS": 1,
                     "INFERENCE_PRECISION_HINT" : "bf16" if use_infer_prec_bf16 else "f32",
                     "CPU_DENORMALS_OPTIMIZATION" : "YES",
                     "ENABLE_HYPER_THREADING" : "YES" if hyper_threading else "NO",
                     "CACHE_DIR" : None}
 
-        if beam_size > 0:
-            self.ov_model = change_model_for_beam(self.ov_model, beam_size)
-        else:
-            self.ov_model = change_model_for_greedy(self.ov_model)
-
+        self.ov_model = self._patch_model(self.ov_model)
         self.compiled_model = self.core.compile_model(self.ov_model, "CPU", ov_config)
-        self.compiled_model.pipeline_config = ModelConfig(self.ov_model)
-        self.beam_size = beam_size
+        self.pipeline_config = ModelConfig(self.ov_model)
         self.last_output_text_map = {}
+        self.kv_cache = None
 
-    def generate(self, text, new_token_length, enforce_input_tokens = None, streamer = None, continuation = None):
+    def generate(self, text, new_token_length, beam_size = 0, enforce_input_tokens = None, streamer = None, continuation = None):
         """
          enforce_input_tokens : enfore input token length to be of this number
         """
@@ -109,7 +137,6 @@ class OVLLM(object):
             assert(type(text) is list)
             assert(type(continuation.text) is list)
             assert(len(continuation.text) == len(text))
-            assert(self.beam_size == 0)
 
             new_token_length = 0
             for t, c in zip(text, continuation.text):
@@ -118,22 +145,33 @@ class OVLLM(object):
                 continuation.tokens.append(tc_toks[0, t_toks.shape[1]:])
                 new_token_length = max(new_token_length, tc_toks.shape[1] - t_toks.shape[1])
 
+        if (beam_size == 0):
+            beam_size = 1
+
+        # allocate static kv-cache
+        max_kv_len = input_token_len + new_token_length*2
+        batch_size = input_ids.shape[0]
+        kvcache_shape = [2 * self.pipeline_config.n_layers,
+                        max_kv_len,
+                        batch_size * beam_size,
+                        self.pipeline_config.n_head,
+                        self.pipeline_config.head_size]
+        if self.kv_cache is None or (list(self.kv_cache.shape) != kvcache_shape):
+            self.kv_cache = Tensor(self.kv_cache_precision, kvcache_shape)
+
         gen_sequence_start = time.time()
-        if self.beam_size == 0:
-            output_ids, latency = generate_greedy(self.compiled_model, input_ids, attention_mask, 
-                                        max_new_tokens=new_token_length,
-                                        eos_token_id=self.tokenizer.eos_token_id,
-                                        pad_token_id=self.tokenizer.pad_token_id,
-                                        max_kv_len=input_token_len + new_token_length*2,
-                                        streamer = streamer,
-                                        continuation = continuation)
-        else:
-            output_ids, latency = generate_beam(self.compiled_model, input_ids, attention_mask, 
-                                        max_new_tokens=new_token_length,
-                                        eos_token_id=self.tokenizer.eos_token_id,
-                                        pad_token_id=self.tokenizer.pad_token_id,
-                                        max_kv_len=input_token_len + new_token_length*2,
-                                        beam_size=self.beam_size)
+
+        output_ids, latency = self._generate(self.compiled_model,
+                                            self.kv_cache,
+                                            eos_token_id=self.tokenizer.eos_token_id,
+                                            pad_token_id=self.tokenizer.pad_token_id,
+                                            input_ids = input_ids,
+                                            attention_mask = attention_mask, 
+                                            beam_size = beam_size,
+                                            max_new_tokens = new_token_length,
+                                            max_kv_len = max_kv_len,
+                                            streamer = streamer,
+                                            continuation = continuation)
 
         if continuation:
             return
@@ -153,7 +191,7 @@ class OVLLM(object):
         tok_tput_1st = input_batch_size * input_token_len / latency[0]
         tok_tput_2nd = input_batch_size * gen_sequence_length / sum(latency[1:])
 
-        print(f"{self.title_tag}  [{input_batch_size}x{self.beam_size}, {input_token_len:4}+{gen_sequence_length}]  {gen_latency*1e3:.1f}ms = [{latency[0]*1e3:.1f}ms  {tok_tput_1st:.1f}tok/s] + [{latency[1]*1e3:.1f}ms + ({average_token_latency*1e3:.1f}ms x {n_latency-2})  {tok_tput_2nd:.1f}tok/s] + [{overhead_latency * 1e3:.1f}ms]")
+        print(f"{self.title_tag}  [{input_batch_size}x{beam_size}, {input_token_len:4}+{gen_sequence_length}]  {gen_latency*1e3:.1f}ms = [{latency[0]*1e3:.1f}ms  {tok_tput_1st:.1f}tok/s] + [{latency[1]*1e3:.1f}ms + ({average_token_latency*1e3:.1f}ms x {n_latency-2})  {tok_tput_2nd:.1f}tok/s] + [{overhead_latency * 1e3:.1f}ms]")
 
         text_key = ",".join(text)
 

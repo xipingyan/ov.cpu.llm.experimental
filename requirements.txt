@@ -1,4 +1,4 @@
 pybind11
 transformers
-torch
-torchvision
+py-libnuma
+git+https://github.com/EleutherAI/lm-evaluation-harness
