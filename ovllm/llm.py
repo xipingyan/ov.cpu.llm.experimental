@@ -178,6 +178,9 @@ class OVLLM(ABC):
                                             streamer = streamer,
                                             continuation = continuation)
 
+        if output_ids is None:
+            return
+
         if continuation:
             return
 
