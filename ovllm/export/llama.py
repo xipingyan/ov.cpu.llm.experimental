@@ -6,6 +6,8 @@ import argparse
 import time
 from .utils import show_model, make_mha, make_fc, make_combined_fc, pt_as_np, make_rms_norm, make_embedding, save_tokenzier, OV_XML_FILE_NAME, configs as make_configs, swish
 from tqdm import tqdm
+import nncf
+from nncf.parameters import CompressWeightsMode
 
 def layer(configs, consts, layer_idx, hidden_states, kv_cache, beam_table, attn_mask, cos_tab, sin_tab):
     name_suffix = f'.layer{layer_idx}'
@@ -140,7 +142,7 @@ if __name__ == "__main__":
     parser.add_argument('--org_model_path', type=str, default='meta-llama/Llama-2-7b-hf', choices=['meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-13b-hf'])
     parser.add_argument('--ov_model_path', type=str, nargs='?', default='./gen/llama-2-7b-chat/')
     parser.add_argument('--compressed_weight', type=bool, nargs='?', default=False)
-    parser.add_argument('--quant_type', type=str, nargs='?', default='', choices=['','f16','nncf_w8'])
+    parser.add_argument('--quant_type', type=str, nargs='?', default='', choices=['','f16','nncf_w8', 'INT8_ASYM', 'INT8_SYM'])
     parser.add_argument("--fuse-qkv", action="store_true", help="fuse Q/K/V Linear projections into single Linear")
     args = parser.parse_args()
     quant_f16 = False
@@ -153,11 +155,15 @@ if __name__ == "__main__":
 
     if args.quant_type:
         args.ov_model_path = os.path.join(args.ov_model_path, args.quant_type)
+
     os.makedirs(args.ov_model_path, exist_ok=True)
-    if args.quant_type == 'f16':
-        quant_f16 = True
-        args.quant_type = ''
-    make_configs['quant_type'] = args.quant_type
+
+    quant_type = args.quant_type
+    if quant_type == 'nncf_w8':
+        make_configs['quant_type'] = quant_type
+    else:
+        make_configs['quant_type'] = ''
+
     make_configs["fuse_qkv"] = args.fuse_qkv
 
     print(f'make_configs:')
@@ -169,7 +175,20 @@ if __name__ == "__main__":
     show_model(model)
     print(f'serialize ov model to "{args.ov_model_path}"...')
     beg = time.time()
-    save_model(model, os.path.join(args.ov_model_path, OV_XML_FILE_NAME), quant_f16)
+
+    # https://github.com/openvinotoolkit/nncf/blob/6f1b2dd82bf97991e33116e63c4299fcdaf35060/nncf/quantization/quantize_model.py#L362
+    # https://github.com/openvinotoolkit/nncf/blob/6f1b2dd82bf97991e33116e63c4299fcdaf35060/nncf/parameters.py#L67
+    #  quant_type can be any string in CompressWeightsMode: 
+    #       INT8_SYM / INT8_ASYM / INT4_SYM / INT4_ASYM / NF4 / E2M1
+    for i in  CompressWeightsMode:
+        if i.name == quant_type or i.value == quant_type:
+            model = nncf.compress_weights(model,
+                                          mode = eval(f"CompressWeightsMode.{i.name}"),
+                                          ratio = 1.0,
+                                          group_size = -1)
+            break
+
+    save_model(model, os.path.join(args.ov_model_path, OV_XML_FILE_NAME), quant_type == 'f16')
     cost = time.time() - beg
     print(f'serialize done, cost {cost:.2f} seconds.')
     print(f'save tokenzier to "{args.ov_model_path}" ...')

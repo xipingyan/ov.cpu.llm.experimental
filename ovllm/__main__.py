@@ -10,11 +10,15 @@ import numa
 
 class WorkSync:
     def __init__(self, total_workers):
-        self.barrier = multiprocessing.Barrier(total_workers)
-        self.manager = multiprocessing.Manager()
-        self.fps = self.manager.dict()
+        self.total_workers = total_workers
+        if self.total_workers > 1:
+            self.barrier = multiprocessing.Barrier(total_workers)
+            self.manager = multiprocessing.Manager()
+            self.fps = self.manager.dict()
         
     def sync_fps(self, numa_node, fps, is_master):
+        if self.total_workers <= 1:
+            return
         self.fps[numa_node] = fps
         self.barrier.wait()
         if is_master:
@@ -53,9 +57,9 @@ def main(args, wsync = None, numa_node = None, is_master = True):
             exit(1)
 
         if args.beam_size == 0:
-            ovllm = OVLLMGreedy(args.model, args.bf16, args.hyper_threading, title_tag)
+            ovllm = OVLLMGreedy(args.model, args.prec, args.hyper_threading, title_tag)
         else:
-            ovllm = OVLLMBeamSearch(args.model, args.bf16, args.hyper_threading, title_tag)
+            ovllm = OVLLMBeamSearch(args.model, args.prec, args.hyper_threading, title_tag)
 
         if not args.prompt and not args.prompt_length:
             # nothing specified, will do a smoke test
@@ -125,7 +129,7 @@ if __name__ == "__main__":
     parser.add_argument('-al', '--answer-length', type=int,
                         default=32, help="generated token length")
     parser.add_argument("--greedy", action="store_true")
-    parser.add_argument("-bf16", "--bf16", action="store_true")
+    parser.add_argument("-prec", "--prec", type=str, choices=['bf16','f16','f32'],  default='bf16', help="INFERENCE_PRECISION_HINT")
     parser.add_argument("-bs", "--beam-size", type=int, default=0)
     parser.add_argument("-r", "--repeat", type=int, default=1)
     parser.add_argument("-ht", "--hyper-threading", action="store_true")

@@ -18,9 +18,9 @@ class Continuation:
 
 @register_model("ovllm")
 class OVLLMModel(LM):
-    def __init__(self, path, nbatch=1, nbeam = 0, bf16 = True, **kwargs):
+    def __init__(self, path, nbatch=1, nbeam = 0, prec = 'bf16', **kwargs):
         super().__init__()
-        self.ovllm = OVLLMGreedy(path, bf16)
+        self.ovllm = OVLLMGreedy(path, prec)
         self.nbatch = nbatch
 
     def loglikelihood(self, requests, disable_tqdm: bool = False):

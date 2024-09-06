@@ -68,7 +68,7 @@ class OVLLM(ABC):
                   continuation):
         pass
 
-    def __init__(self, model_path, use_infer_prec_bf16 = True, hyper_threading = False, title_tag = ""):
+    def __init__(self, model_path, prec, hyper_threading = False, title_tag = ""):
         self.title_tag = f"[{title_tag} {ovrt.get_version()}]"
         # load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
@@ -85,8 +85,12 @@ class OVLLM(ABC):
         self.ov_model = self.core.read_model(Path(model_path) / OV_XML_FILE_NAME)
 
         # add preprocessor for bf16 kv_cache
-        if use_infer_prec_bf16:
-            self.kv_cache_precision = Type.bf16
+        if prec == "bf16" or prec == "f16":
+            if prec == "bf16":
+                self.kv_cache_precision = Type.bf16
+            if prec == "f16":
+                self.kv_cache_precision = Type.f16
+
             ppp = PrePostProcessor(self.ov_model)
             for key in self.ov_model.inputs:
                 if "kv_cache" in key.get_any_name() and self.kv_cache_precision != key.get_element_type():
@@ -96,11 +100,12 @@ class OVLLM(ABC):
             self.kv_cache_precision = self.ov_model.input("kv_cache").get_element_type()
 
         ov_config={"PERFORMANCE_HINT": "LATENCY", "NUM_STREAMS": 1,
-                    "INFERENCE_PRECISION_HINT" : "bf16" if use_infer_prec_bf16 else "f32",
+                    "INFERENCE_PRECISION_HINT" : prec,
                     "CPU_DENORMALS_OPTIMIZATION" : "YES",
                     "ENABLE_HYPER_THREADING" : "YES" if hyper_threading else "NO",
                     "CACHE_DIR" : None}
 
+        print(f"{self.title_tag} Compile OpenVINO model with ov_config={ov_config}")
         self.ov_model = self._patch_model(self.ov_model)
         self.compiled_model = self.core.compile_model(self.ov_model, "CPU", ov_config)
         self.pipeline_config = ModelConfig(self.ov_model)
@@ -185,11 +190,11 @@ class OVLLM(ABC):
         n_latency = len(latency)
         token_total = sum(latency)
 
-        average_token_latency = sum(latency[2:])/(n_latency-2)
+        average_token_latency = sum(latency[2:])/(n_latency-2) if n_latency > 2 else 0
         overhead_latency = gen_latency - token_total
         
         tok_tput_1st = input_batch_size * input_token_len / latency[0]
-        tok_tput_2nd = input_batch_size * gen_sequence_length / sum(latency[1:])
+        tok_tput_2nd = (input_batch_size * gen_sequence_length / sum(latency[1:])) if n_latency > 1 else 0
 
         print(f"{self.title_tag}  [{input_batch_size}x{beam_size}, {input_token_len:4}+{gen_sequence_length}]  {gen_latency*1e3:.1f}ms = [{latency[0]*1e3:.1f}ms  {tok_tput_1st:.1f}tok/s] + [{latency[1]*1e3:.1f}ms + ({average_token_latency*1e3:.1f}ms x {n_latency-2})  {tok_tput_2nd:.1f}tok/s] + [{overhead_latency * 1e3:.1f}ms]")
 
