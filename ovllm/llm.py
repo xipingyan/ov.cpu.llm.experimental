@@ -13,6 +13,8 @@ import openvino.runtime as ovrt
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from .export.utils import OV_XML_FILE_NAME
 from abc import ABC, abstractmethod
+import json
+import os.path
 
 class ModelConfig:
     def __init__(self, ov_model) -> None:
@@ -70,6 +72,10 @@ class OVLLM(ABC):
 
     def __init__(self, model_path, prec, hyper_threading = False, title_tag = ""):
         self.title_tag = f"[{title_tag} {ovrt.get_version()}]"
+        self.config_org = {}
+        if os.path.isfile(Path(model_path) / "config_org.json"):
+            with open(Path(model_path) / "config_org.json") as f:
+                self.config_org = json.load(f)
         # load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
@@ -111,6 +117,10 @@ class OVLLM(ABC):
         self.pipeline_config = ModelConfig(self.ov_model)
         self.last_output_text_map = {}
         self.kv_cache = None
+
+    def _get_rotary_base(self):
+        # qwen has special base
+        return float(self.config_org.get('rope_theta', '10000'))
 
     def generate(self, text, new_token_length, beam_size = 0, enforce_input_tokens = None, streamer = None, continuation = None):
         """

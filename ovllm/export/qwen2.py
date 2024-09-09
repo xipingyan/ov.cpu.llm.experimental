@@ -90,7 +90,8 @@ def get_params_from_model(path):
 
     assert(model.config.num_key_value_heads == model.config.num_attention_heads)
     assert(model.config.hidden_act in ['silu'])
-    assert(model.config.rope_scaling is None)
+    assert(model.config.use_sliding_window == False)
+    assert(model.config.rope_theta == 1000000.0)
 
     configs = {
         'layer_num': model.config.num_hidden_layers,
@@ -135,12 +136,12 @@ def get_params_from_model(path):
     print(f'extracting done, cost {cost:.2f} seconds.\nmodel configs:')
     for k, v in configs.items():
         print(f'	{k}: {v}')
-    return configs, consts
+    return configs, consts, model.config
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('')
     parser.add_argument('--org_model_path', type=str, default='Model ID (can be a Hugginface Hub id, or a local directory)')
-    parser.add_argument('--ov_model_path', type=str, nargs='?', default='./gen/llama-2-7b-chat/')
+    parser.add_argument('--ov_model_path', type=str, nargs='?', default='./gen/qwen2-7b-chat/')
     parser.add_argument('--quant_type', type=str, nargs='?', default='', choices=['','f16','nncf_w8', 'INT8_ASYM', 'INT8_SYM'])
     parser.add_argument("--fuse-qkv", action="store_true", help="fuse Q/K/V Linear projections into single Linear")
     args = parser.parse_args()
@@ -163,7 +164,7 @@ if __name__ == "__main__":
     for k, v in make_configs.items():
         print(f'	{k}: {v}')
 
-    configs, consts = get_params_from_model(args.org_model_path)
+    configs, consts, org_config = get_params_from_model(args.org_model_path)
     model = create_model(configs, consts)
     show_model(model)
     print(f'serialize ov model to "{args.ov_model_path}"...')
@@ -186,3 +187,5 @@ if __name__ == "__main__":
     print(f'serialize done, cost {cost:.2f} seconds.')
     print(f'save tokenzier to "{args.ov_model_path}" ...')
     save_tokenzier(args.org_model_path, args.ov_model_path)
+    # save original json
+    org_config.to_json_file(f'{args.ov_model_path}/config_org.json')

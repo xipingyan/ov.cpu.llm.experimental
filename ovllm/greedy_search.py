@@ -40,7 +40,7 @@ class OVLLMGreedy(llm.OVLLM):
         # initialize "straight" beams in greedy search
         beam_table = np.zeros([0, max_kv_len]).astype("int32")
 
-        sin_tab, cos_tab = utils.create_sinusoidal_positions(max_kv_len, self.pipeline_config.rotary_dims)
+        sin_tab, cos_tab = utils.create_sinusoidal_positions(max_kv_len, self.pipeline_config.rotary_dims, self._get_rotary_base())
         model_inputs = {"input_ids": input_ids,
                         "attn_mask": attention_mask,
                         "kv_cache": kv_cache,

@@ -80,7 +80,7 @@ class OVLLMSmoothQuantCalib(llm.OVLLM):
         # initialize "straight" beams in greedy search
         beam_table = np.zeros([batch_size, max_kv_len]).astype("int32")
 
-        sin_tab, cos_tab = utils.create_sinusoidal_positions(max_kv_len, self.pipeline_config.rotary_dims)
+        sin_tab, cos_tab = utils.create_sinusoidal_positions(max_kv_len, self.pipeline_config.rotary_dims, self._get_rotary_base())
         model_inputs = {"input_ids": input_ids[:, :self.token_limit],
                         "attn_mask": attention_mask[:, :self.token_limit],
                         "kv_cache": kv_cache,

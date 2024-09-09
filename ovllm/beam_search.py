@@ -320,7 +320,7 @@ class OVLLMBeamSearch(llm.OVLLM):
         first_iteration = True
         global_beam_idx = np.zeros([batch_size * num_beams, max_kv_len]).astype("int32")
         beam_table = np.zeros([batch_size * num_beams, max_kv_len]).astype("int32")
-        sin_tab, cos_tab = utils.create_sinusoidal_positions(max_kv_len, self.pipeline_config.rotary_dims)
+        sin_tab, cos_tab = utils.create_sinusoidal_positions(max_kv_len, self.pipeline_config.rotary_dims, self._get_rotary_base())
 
         org_input_ids = input_ids
         input_ids = np.repeat(input_ids, num_beams, axis=0)
