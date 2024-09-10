@@ -59,7 +59,7 @@ def create_model(configs, consts):
     beam_table = opset.parameter([-1, -1], Type.i32, name='beam_table')
     # [batch, query_len+past_len]
     attn_mask = opset.parameter([-1, -1], Type.f32, name='attn_mask')
-    # [max_kv_len, rotary_dims//2]
+    # [max_kv_len, rotary_dims]
     cos_tab = opset.parameter([-1, configs['rotary_dims']], Type.f32, name='cos_tab')
     sin_tab = opset.parameter([-1, configs['rotary_dims']], Type.f32, name='sin_tab')
 

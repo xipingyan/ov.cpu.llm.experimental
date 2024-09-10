@@ -4,44 +4,37 @@ import numpy as np
 import sys, os
 import argparse
 import time
-from .utils import show_model, make_mha, make_fc, make_combined_fc, pt_as_np, make_rms_norm, make_embedding, save_tokenzier, OV_XML_FILE_NAME, configs as make_configs, swish
+from .utils import show_model, make_mha, make_fc, pt_as_np, make_rms_norm, make_embedding, save_tokenzier, OV_XML_FILE_NAME, configs as make_configs
 from tqdm import tqdm
 import nncf
 from nncf.parameters import CompressWeightsMode
 
 def layer(configs, consts, layer_idx, hidden_states, kv_cache, beam_table, attn_mask, cos_tab, sin_tab):
     name_suffix = f'.layer{layer_idx}'
-    name_prefix = 'model.layers.self_attn'
+    name_prefix = 'transformer.layers.self_attention'
     # layerNorm operation
-    input_layernorm = make_rms_norm('model.layers.input_layernorm', hidden_states, consts['layers'][layer_idx], configs['rms_norm_eps'], name_suffix)
+    input_layernorm = make_rms_norm('transformer.layers.input_layernorm', hidden_states, consts['layers'][layer_idx], configs['layernorm_epsilon'], name_suffix)
 
-    if not make_configs["fuse_qkv"]:
-        q = make_fc('model.layers.self_attn.q_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
-        k = make_fc('model.layers.self_attn.k_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
-        v = make_fc('model.layers.self_attn.v_proj', input_layernorm, consts['layers'][layer_idx], name_suffix)
-        inputs = [q, k, v]
-    else:
-        qkv = make_combined_fc(['model.layers.self_attn.q_proj', 'model.layers.self_attn.k_proj', 'model.layers.self_attn.v_proj'], input_layernorm, consts['layers'][layer_idx], name_suffix)
-        inputs = [qkv]
+    qkv = make_fc('transformer.layers.self_attention.query_key_value', input_layernorm, consts['layers'][layer_idx], name_suffix)
 
     # custom op
-    attn_output = make_mha(inputs, kv_cache, beam_table, attn_mask, cos_tab, sin_tab,
+    attn_output = make_mha([qkv], kv_cache, beam_table, attn_mask, cos_tab, sin_tab,
                            layer_idx, configs['rotary_dims'], configs['hidden_size'], configs['head_num'],
-                           name=f'{name_prefix}.mha{name_suffix}')
+                           name=f'{name_prefix}.mha{name_suffix}', num_kv_heads=configs['num_kv_heads'], rope_type='original')
 
-    attn_output = make_fc('model.layers.self_attn.o_proj', attn_output, consts['layers'][layer_idx], name_suffix)
+    attn_output = make_fc('transformer.layers.self_attention.dense', attn_output, consts['layers'][layer_idx], name_suffix)
 
     attn_output = opset.add(hidden_states, attn_output, auto_broadcast='numpy', name=f'{name_prefix}.add0{name_suffix}')
-    post_attention_layernorm = make_rms_norm('model.layers.post_attention_layernorm', attn_output, consts['layers'][layer_idx], configs['rms_norm_eps'], name_suffix)
+    post_attention_layernorm = make_rms_norm('transformer.layers.post_attention_layernorm', attn_output, consts['layers'][layer_idx], configs['layernorm_epsilon'], name_suffix)
 
     # mlp
     def mlp(states):
-        gate_proj = make_fc('model.layers.mlp.gate_proj', states, consts['layers'][layer_idx], name_suffix)
-        silu = swish(gate_proj, name=f'{name_prefix}.mlp.silu{name_suffix}')
-        up_proj = make_fc('model.layers.mlp.up_proj', states, consts['layers'][layer_idx], name_suffix)
-        mul = opset.multiply(silu, up_proj, auto_broadcast='numpy', name=f'{name_prefix}.mlp.mul{name_suffix}')
-        down_proj = make_fc('model.layers.mlp.down_proj', mul, consts['layers'][layer_idx], name_suffix)
-        return down_proj
+        dense_h_to_4h = make_fc('transformer.layers.mlp.dense_h_to_4h', states, consts['layers'][layer_idx], name_suffix)
+        nodes = opset.split(dense_h_to_4h, axis=-1, num_splits=2, name=f'{name_prefix}.mlp.split{name_suffix}')
+        silu = opset.swish(nodes.output(0), name=f'{name_prefix}.mlp.silu{name_suffix}')
+        mul = opset.multiply(silu, nodes.output(1), auto_broadcast='numpy', name=f'{name_prefix}.mlp.mul{name_suffix}')
+        dense_4h_to_h = make_fc('transformer.layers.mlp.dense_4h_to_h', mul, consts['layers'][layer_idx], name_suffix)
+        return dense_4h_to_h
 
     mlp_output = mlp(post_attention_layernorm)
     # residual connection.
@@ -53,8 +46,8 @@ def create_model(configs, consts):
     beg = time.time()
     # [batch, query_len]
     input_ids = opset.parameter([-1, -1], Type.i32, name='input_ids')
-    # [2 * n_layers, max_kv_len, batch, n_head, head_size]
-    kv_cache = opset.parameter([2 * configs['layer_num'], -1, -1, configs['head_num'], configs['head_size']], Type.f32, name='kv_cache')
+    # [2 * n_layers, max_kv_len, batch, num_kv_heads, head_size]
+    kv_cache = opset.parameter([2 * configs['layer_num'], -1, -1, configs['num_kv_heads'], configs['head_size']], Type.f32, name='kv_cache')
     # [batch, max_kv_len]
     beam_table = opset.parameter([-1, -1], Type.i32, name='beam_table')
     # [batch, query_len+past_len]
@@ -63,7 +56,7 @@ def create_model(configs, consts):
     cos_tab = opset.parameter([-1, configs['rotary_dims']], Type.f32, name='cos_tab')
     sin_tab = opset.parameter([-1, configs['rotary_dims']], Type.f32, name='sin_tab')
 
-    inputs_embeds = make_embedding('model.embed_tokens.weight', input_ids, consts)
+    inputs_embeds = make_embedding('transformer.embedding.word_embeddings.weight', input_ids, consts)
     hidden_states = inputs_embeds
 
     for i in tqdm(range(configs['layer_num'])):
@@ -73,9 +66,9 @@ def create_model(configs, consts):
     hidden_states = opset.slice(hidden_states, np.array([-1]), np.array([np.iinfo(np.int32).max]), np.array([1]), np.array([1]))
 
     # final_layernorm
-    final_layernorm = make_rms_norm('model.norm', hidden_states, consts, configs['rms_norm_eps'])
+    final_layernorm = make_rms_norm('transformer.encoder.final_layernorm', hidden_states, consts, configs['layernorm_epsilon'])
     # embed_out
-    embed_out = make_fc('lm_head', final_layernorm, consts)
+    embed_out = make_fc('transformer.output_layer', final_layernorm, consts)
     embed_out_result = opset.result(embed_out, name='logits')
     cost = time.time() - beg
     print(f'generate ov model done, cost {cost:.2f} seconds.')
@@ -85,51 +78,53 @@ def create_model(configs, consts):
 def get_params_from_model(path):
     print(f'extracting from model "{path}"...')
     beg = time.time()
-    from transformers import AutoModelForCausalLM
-    model = AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True).to('cpu').eval()
+    from transformers import AutoModel
+    model = AutoModel.from_pretrained(path, trust_remote_code=True).to('cpu').eval()
 
-    assert(model.config.num_key_value_heads == model.config.num_attention_heads)
-    assert(model.config.hidden_act in ['silu'])
-    assert(model.config.use_sliding_window == False)
-    assert(model.config.rope_theta == 1000000.0)
+    assert(model.config.add_bias_linear == False)
+    assert(model.config.add_qkv_bias == True)
+    assert(model.config.apply_query_key_layer_scaling == True)
+    assert(model.config.apply_residual_connection_post_layernorm == False)
+    assert(model.config.bias_dropout_fusion == True)
+    assert(model.config.multi_query_attention == True)
+    assert(model.config.original_rope == True)
+    assert(model.config.post_layer_norm == True)
+    assert(model.config.rmsnorm == True)
 
     configs = {
-        'layer_num': model.config.num_hidden_layers,
+        'layer_num': model.config.num_layers,
         'head_num': model.config.num_attention_heads,
         'head_size': model.config.hidden_size // model.config.num_attention_heads,
         'hidden_size': model.config.hidden_size,
-        'max_position_embeddings': model.config.max_position_embeddings,
-        'rotary_dims': int(model.config.hidden_size // model.config.num_attention_heads),
+        'max_position_embeddings': model.config.seq_length,
+        'rotary_dims': model.config.kv_channels // 2, #int(model.config.hidden_size // model.config.num_attention_heads),
         #'gelu_mode': model.config.hidden_act,
         #'intermediate_size': model.config.intermediate_size,
         #'num_key_value_heads': model.config.num_key_value_heads,
-        'rms_norm_eps': model.config.rms_norm_eps,
+        'ffn_hidden_size': model.config.ffn_hidden_size,
+        'kv_channels': model.config.kv_channels,
+        'layernorm_epsilon': model.config.layernorm_epsilon,
+        'num_kv_heads': model.config.multi_query_group_num,
     }
 
     consts = {
-        'model.embed_tokens.weight': pt_as_np(model.model.embed_tokens.weight),
-        'model.norm.weight': pt_as_np(model.model.norm.weight),
-        'lm_head.weight': pt_as_np(model.lm_head.weight),
-        'lm_head.bias': pt_as_np(model.lm_head.bias),
+        'transformer.embedding.word_embeddings.weight': pt_as_np(model.transformer.embedding.word_embeddings.weight),
+        'transformer.encoder.final_layernorm.weight': pt_as_np(model.transformer.encoder.final_layernorm.weight),
+        'transformer.output_layer.weight': pt_as_np(model.transformer.output_layer.weight),
+        'transformer.output_layer.bias': pt_as_np(model.transformer.output_layer.bias),
         'layers': [
             {
-                'model.layers.input_layernorm.weight': pt_as_np(l.input_layernorm.weight),
-                'model.layers.post_attention_layernorm.weight': pt_as_np(l.post_attention_layernorm.weight),
-                'model.layers.self_attn.q_proj.bias': pt_as_np(l.self_attn.q_proj.bias),
-                'model.layers.self_attn.q_proj.weight': pt_as_np(l.self_attn.q_proj.weight),
-                'model.layers.self_attn.k_proj.bias': pt_as_np(l.self_attn.k_proj.bias),
-                'model.layers.self_attn.k_proj.weight': pt_as_np(l.self_attn.k_proj.weight),
-                'model.layers.self_attn.v_proj.bias': pt_as_np(l.self_attn.v_proj.bias),
-                'model.layers.self_attn.v_proj.weight': pt_as_np(l.self_attn.v_proj.weight),
-                'model.layers.self_attn.o_proj.bias': pt_as_np(l.self_attn.o_proj.bias),
-                'model.layers.self_attn.o_proj.weight': pt_as_np(l.self_attn.o_proj.weight),
-                'model.layers.mlp.gate_proj.bias': pt_as_np(l.mlp.gate_proj.bias),
-                'model.layers.mlp.gate_proj.weight': pt_as_np(l.mlp.gate_proj.weight),
-                'model.layers.mlp.up_proj.bias': pt_as_np(l.mlp.up_proj.bias),
-                'model.layers.mlp.up_proj.weight': pt_as_np(l.mlp.up_proj.weight),
-                'model.layers.mlp.down_proj.bias': pt_as_np(l.mlp.down_proj.bias),
-                'model.layers.mlp.down_proj.weight': pt_as_np(l.mlp.down_proj.weight)
-            } for l in model.model.layers
+                'transformer.layers.input_layernorm.weight': pt_as_np(l.input_layernorm.weight),
+                'transformer.layers.post_attention_layernorm.weight': pt_as_np(l.post_attention_layernorm.weight),
+                'transformer.layers.self_attention.query_key_value.bias': pt_as_np(l.self_attention.query_key_value.bias),
+                'transformer.layers.self_attention.query_key_value.weight': pt_as_np(l.self_attention.query_key_value.weight),
+                'transformer.layers.self_attention.dense.bias': pt_as_np(l.self_attention.dense.bias),
+                'transformer.layers.self_attention.dense.weight': pt_as_np(l.self_attention.dense.weight),
+                'transformer.layers.mlp.dense_h_to_4h.bias': pt_as_np(l.mlp.dense_h_to_4h.bias),
+                'transformer.layers.mlp.dense_h_to_4h.weight': pt_as_np(l.mlp.dense_h_to_4h.weight),
+                'transformer.layers.mlp.dense_4h_to_h.bias': pt_as_np(l.mlp.dense_4h_to_h.bias),
+                'transformer.layers.mlp.dense_4h_to_h.weight': pt_as_np(l.mlp.dense_4h_to_h.weight)
+            } for l in model.transformer.encoder.layers
         ],
     }
     cost = time.time() - beg
@@ -141,9 +136,8 @@ def get_params_from_model(path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('')
     parser.add_argument('--org_model_path', type=str, default='Model ID (can be a Hugginface Hub id, or a local directory)')
-    parser.add_argument('--ov_model_path', type=str, nargs='?', default='./gen/qwen2-7b-chat/')
+    parser.add_argument('--ov_model_path', type=str, nargs='?', default='./gen/chatglm3-6b/')
     parser.add_argument('--quant_type', type=str, nargs='?', default='', choices=['','f16','nncf_w8', 'INT8_ASYM', 'INT8_SYM'])
-    parser.add_argument("--fuse-qkv", action="store_true", help="fuse Q/K/V Linear projections into single Linear")
     args = parser.parse_args()
     quant_f16 = False
 
@@ -157,8 +151,6 @@ if __name__ == "__main__":
         make_configs['quant_type'] = quant_type
     else:
         make_configs['quant_type'] = ''
-
-    make_configs["fuse_qkv"] = args.fuse_qkv
 
     print(f'make_configs:')
     for k, v in make_configs.items():
@@ -189,3 +181,4 @@ if __name__ == "__main__":
     save_tokenzier(args.org_model_path, args.ov_model_path)
     # save original json
     org_config.to_json_file(f'{args.ov_model_path}/config_org.json')
+

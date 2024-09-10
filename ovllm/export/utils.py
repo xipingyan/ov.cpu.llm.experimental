@@ -243,7 +243,7 @@ def make_embedding(key, input, consts):
     return inputs_embeds
 
 def save_tokenzier(orig_model_path, ov_model_path):
-    tokenizer = AutoTokenizer.from_pretrained(orig_model_path)
+    tokenizer = AutoTokenizer.from_pretrained(orig_model_path, trust_remote_code=True)
     tokenizer.save_pretrained(ov_model_path)
 
 @nameable_op
