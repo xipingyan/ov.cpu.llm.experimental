@@ -2,7 +2,7 @@ from transformers import AutoTokenizer
 from openvino.runtime import Core, Model, Tensor, PartialShape, Type, serialize, opset_utils, Node, Output, Extension
 from openvino.runtime import opset10 as opset
 from openvino.runtime.op import Constant
-from openvino.runtime.op import _MultiHeadAttention as mha
+# from openvino.runtime.op import _MultiHeadAttention as mha
 import numpy as np
 import os
 import sys
